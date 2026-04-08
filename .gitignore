@@ -1,0 +1,9 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+data/cloned_tasks.json
+.idea/
+.vscode/
+*.log
