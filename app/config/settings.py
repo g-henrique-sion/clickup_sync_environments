@@ -13,12 +13,23 @@ SOURCE_CLICKUP_TOKEN: str = os.getenv("SOURCE_CLICKUP_TOKEN", "")
 DEST_CLICKUP_TOKEN: str = os.getenv("DEST_CLICKUP_TOKEN", "")
 
 # ── IDs ───────────────────────────────────────────────────────
-SOURCE_LIST_ID: str = os.getenv("SOURCE_LIST_ID", "")
 DEST_LIST_ID: str = os.getenv("DEST_LIST_ID", "")
 DEST_WORKSPACE_ID: str = os.getenv("DEST_WORKSPACE_ID", "")
 
-# ── Trigger ───────────────────────────────────────────────────
-TRIGGER_STATUS: str = os.getenv("TRIGGER_STATUS", "").strip().lower()
+# ── Mapeamento lista_origem -> status trigger ─────────────────
+# JSON: {"list_id": "status_trigger", ...}
+# Cada lista monitorada tem seu próprio status que dispara a clonagem.
+_raw_list_map = os.getenv("SOURCE_LIST_MAP", "{}")
+try:
+    SOURCE_LIST_MAP: dict[str, str] = {
+        k.strip(): v.strip().lower()
+        for k, v in json.loads(_raw_list_map).items()
+    }
+except json.JSONDecodeError:
+    logging.getLogger(__name__).warning(
+        "SOURCE_LIST_MAP inválido (JSON). Valor bruto ignorado."
+    )
+    SOURCE_LIST_MAP = {}
 
 # ── Field mapping (cf_id origem -> cf_id destino) ─────────────
 _raw_map = os.getenv("CLONE_FIELD_MAP", "{}")
@@ -45,12 +56,15 @@ DATA_DIR: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__f
 _REQUIRED = {
     "SOURCE_CLICKUP_TOKEN": SOURCE_CLICKUP_TOKEN,
     "DEST_CLICKUP_TOKEN": DEST_CLICKUP_TOKEN,
-    "SOURCE_LIST_ID": SOURCE_LIST_ID,
+    "SOURCE_LIST_MAP": bool(SOURCE_LIST_MAP),
     "DEST_LIST_ID": DEST_LIST_ID,
-    "TRIGGER_STATUS": TRIGGER_STATUS,
 }
 
 
 def validate_config() -> list[str]:
     """Retorna lista de variáveis obrigatórias que estão faltando."""
-    return [k for k, v in _REQUIRED.items() if not v]
+    missing = []
+    for k, v in _REQUIRED.items():
+        if not v:
+            missing.append(k)
+    return missing

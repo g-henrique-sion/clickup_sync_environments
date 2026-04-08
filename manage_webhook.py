@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from app.config.settings import SOURCE_CLICKUP_TOKEN, SOURCE_LIST_ID
+from app.config.settings import SOURCE_CLICKUP_TOKEN
 
 BASE_URL = "https://api.clickup.com/api/v2"
 
