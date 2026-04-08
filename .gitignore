@@ -7,3 +7,4 @@ data/cloned_tasks.json
 .idea/
 .vscode/
 *.log
+data/

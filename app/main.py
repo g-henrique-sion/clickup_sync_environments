@@ -93,7 +93,7 @@ async def receive_webhook(request: Request):
         logger.warning("Evento de status sem novo status no history_items.")
         return {"status": "ignored", "reason": "no status in history"}
 
-    logger.info(
+    logger.debug(
         "Webhook recebido: task=%s, novo_status='%s'",
         payload.task_id, new_status,
     )

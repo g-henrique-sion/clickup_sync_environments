@@ -2,7 +2,7 @@
 
 import logging
 
-from app.config.settings import CLONE_FIELD_MAP, SOURCE_LIST_ID, TRIGGER_STATUS
+from app.config.settings import CLONE_FIELD_MAP, SOURCE_LIST_MAP
 from app.core.clickup_client import (
     build_custom_fields_payload,
     clone_comments,
@@ -21,29 +21,32 @@ def process_status_change(task_id: str, new_status: str) -> dict | None:
     Returns:
         dict com dados da task criada, ou None se ignorada.
     """
-    # 1. Verifica se o status é o trigger
-    if new_status.strip().lower() != TRIGGER_STATUS:
+    # 1. Verifica dedup (antes de qualquer chamada à API)
+    if was_cloned(task_id):
+        logger.debug("Task %s já foi clonada anteriormente. Ignorando.", task_id)
+        return None
+
+    # 2. Busca dados completos da task
+    logger.info("Webhook recebido para task %s (status='%s'). Buscando dados...", task_id, new_status)
+    source_task = fetch_task(task_id)
+
+    # 3. Verifica se a task pertence a uma das listas monitoradas
+    list_info = source_task.get("list", {})
+    source_list_id = list_info.get("id", "")
+    trigger_status = SOURCE_LIST_MAP.get(source_list_id)
+
+    if trigger_status is None:
         logger.debug(
-            "Status '%s' não é o trigger '%s'. Ignorando task %s.",
-            new_status, TRIGGER_STATUS, task_id,
+            "Task %s pertence à lista %s, que não está no SOURCE_LIST_MAP. Ignorando.",
+            task_id, source_list_id,
         )
         return None
 
-    # 2. Verifica dedup
-    if was_cloned(task_id):
-        logger.info("Task %s já foi clonada anteriormente. Ignorando.", task_id)
-        return None
-
-    # 3. Busca dados completos da task
-    logger.info("Status trigger detectado! Buscando task %s...", task_id)
-    source_task = fetch_task(task_id)
-
-    # 4. Valida que a task pertence à lista monitorada
-    list_info = source_task.get("list", {})
-    if list_info.get("id") != SOURCE_LIST_ID:
+    # 4. Verifica se o novo status é o trigger desta lista
+    if new_status.strip().lower() != trigger_status:
         logger.debug(
-            "Task %s pertence à lista %s, não à monitorada %s. Ignorando.",
-            task_id, list_info.get("id"), SOURCE_LIST_ID,
+            "Status '%s' não é o trigger '%s' da lista %s. Ignorando task %s.",
+            new_status, trigger_status, source_list_id, task_id,
         )
         return None
 
@@ -53,8 +56,8 @@ def process_status_change(task_id: str, new_status: str) -> dict | None:
     custom_fields = build_custom_fields_payload(source_task)
 
     logger.info(
-        "Clonando task '%s' (%s) com %d custom fields (map=%d)...",
-        name, task_id, len(custom_fields), len(CLONE_FIELD_MAP),
+        "Clonando task '%s' (%s) da lista %s com %d custom fields (map=%d)...",
+        name, task_id, source_list_id, len(custom_fields), len(CLONE_FIELD_MAP),
     )
 
     created = create_task_in_dest(
@@ -79,8 +82,8 @@ def process_status_change(task_id: str, new_status: str) -> dict | None:
     mark_cloned(task_id)
 
     logger.info(
-        "Clone concluído: '%s' -> destino id=%s",
-        name, created.get("id"),
+        "Clone concluído: '%s' (lista %s) -> destino id=%s",
+        name, source_list_id, created.get("id"),
     )
 
     return created
