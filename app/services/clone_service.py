@@ -10,7 +10,7 @@ from app.core.clickup_client import (
     create_task_in_dest,
     fetch_task,
 )
-from app.services.dedup import mark_cloned, was_cloned
+from app.services.dedup import mark_cloned, release_reservation, try_reserve
 
 logger = logging.getLogger(__name__)
 
@@ -21,69 +21,92 @@ def process_status_change(task_id: str, new_status: str) -> dict | None:
     Returns:
         dict com dados da task criada, ou None se ignorada.
     """
-    # 1. Verifica dedup (antes de qualquer chamada à API)
-    if was_cloned(task_id):
-        logger.debug("Task %s já foi clonada anteriormente. Ignorando.", task_id)
-        return None
-
-    # 2. Busca dados completos da task
-    logger.info("Webhook recebido para task %s (status='%s'). Buscando dados...", task_id, new_status)
-    source_task = fetch_task(task_id)
-
-    # 3. Verifica se a task pertence a uma das listas monitoradas
-    list_info = source_task.get("list", {})
-    source_list_id = list_info.get("id", "")
-    trigger_status = SOURCE_LIST_MAP.get(source_list_id)
-
-    if trigger_status is None:
+    # 1. Reserva task (evita corrida durante rajadas)
+    if not try_reserve(task_id):
         logger.debug(
-            "Task %s pertence à lista %s, que não está no SOURCE_LIST_MAP. Ignorando.",
-            task_id, source_list_id,
+            "Task %s ja clonada ou em processamento. Ignorando evento duplicado.",
+            task_id,
         )
         return None
 
-    # 4. Verifica se o novo status é o trigger desta lista
-    if new_status.strip().lower() != trigger_status:
-        logger.debug(
-            "Status '%s' não é o trigger '%s' da lista %s. Ignorando task %s.",
-            new_status, trigger_status, source_list_id, task_id,
+    cloned = False
+    try:
+        # 2. Busca dados completos da task
+        logger.info(
+            "Webhook recebido para task %s (status='%s'). Buscando dados...",
+            task_id,
+            new_status,
         )
-        return None
+        source_task = fetch_task(task_id)
 
-    # 5. Monta payload e cria clone
-    name = source_task.get("name", "Sem nome")
-    description = source_task.get("description", "")
-    custom_fields = build_custom_fields_payload(source_task)
+        # 3. Verifica se a task pertence a uma das listas monitoradas
+        list_info = source_task.get("list", {})
+        source_list_id = list_info.get("id", "")
+        trigger_status = SOURCE_LIST_MAP.get(source_list_id)
 
-    logger.info(
-        "Clonando task '%s' (%s) da lista %s com %d custom fields (map=%d)...",
-        name, task_id, source_list_id, len(custom_fields), len(CLONE_FIELD_MAP),
-    )
+        if trigger_status is None:
+            logger.debug(
+                "Task %s pertence a lista %s, fora do SOURCE_LIST_MAP. Ignorando.",
+                task_id,
+                source_list_id,
+            )
+            return None
 
-    created = create_task_in_dest(
-        name=name,
-        description=description,
-        custom_fields=custom_fields or None,
-    )
+        # 4. Verifica se o novo status e o trigger desta lista
+        if new_status.strip().lower() != trigger_status:
+            logger.debug(
+                "Status '%s' nao e trigger '%s' da lista %s. Ignorando task %s.",
+                new_status,
+                trigger_status,
+                source_list_id,
+                task_id,
+            )
+            return None
 
-    # 5b. Clona anexos (task + custom fields de arquivo)
-    try:
-        clone_attachments(source_task, created.get("id"))
-    except Exception as e:
-        logger.exception("Falha ao clonar anexos da task %s: %s", task_id, e)
+        # 5. Monta payload e cria clone
+        name = source_task.get("name", "Sem nome")
+        description = source_task.get("description", "")
+        custom_fields = build_custom_fields_payload(source_task)
 
-    # 5c. Clona comentários (inclui replies)
-    try:
-        clone_comments(task_id, created.get("id"))
-    except Exception as e:
-        logger.exception("Falha ao clonar comentários da task %s: %s", task_id, e)
+        logger.info(
+            "Clonando task '%s' (%s) da lista %s com %d custom fields (map=%d)...",
+            name,
+            task_id,
+            source_list_id,
+            len(custom_fields),
+            len(CLONE_FIELD_MAP),
+        )
 
-    # 6. Marca como clonada
-    mark_cloned(task_id)
+        created = create_task_in_dest(
+            name=name,
+            description=description,
+            custom_fields=custom_fields or None,
+        )
 
-    logger.info(
-        "Clone concluído: '%s' (lista %s) -> destino id=%s",
-        name, source_list_id, created.get("id"),
-    )
+        # 5b. Clona anexos (task + custom fields de arquivo)
+        try:
+            clone_attachments(source_task, created.get("id"))
+        except Exception as e:
+            logger.exception("Falha ao clonar anexos da task %s: %s", task_id, e)
 
-    return created
+        # 5c. Clona comentarios (inclui replies)
+        try:
+            clone_comments(task_id, created.get("id"))
+        except Exception as e:
+            logger.exception("Falha ao clonar comentarios da task %s: %s", task_id, e)
+
+        # 6. Marca como clonada
+        mark_cloned(task_id)
+        cloned = True
+
+        logger.info(
+            "Clone concluido: '%s' (lista %s) -> destino id=%s",
+            name,
+            source_list_id,
+            created.get("id"),
+        )
+
+        return created
+    finally:
+        if not cloned:
+            release_reservation(task_id)
