@@ -193,6 +193,7 @@ def _upload_task_attachment(dest_task_id: str, file_path: str, filename: str, co
     url = f"{BASE_URL}/task/{dest_task_id}/attachment"
     with open(file_path, "rb") as f:
         for key in ("attachment", "file", "attachment[0]"):
+            f.seek(0)
             files = {key: (filename, f, content_type)}
             try:
                 _request_with_retry(session, "POST", url, files=files)
@@ -212,6 +213,7 @@ def _upload_custom_field_attachment(
     url = f"{BASE_URL_V3}/workspaces/{workspace_id}/custom_fields/{dest_field_id}/attachments"
     with open(file_path, "rb") as f:
         for key in ("file", "attachment", "attachment[0]"):
+            f.seek(0)
             files = {key: (filename, f, content_type)}
             try:
                 resp = _request_with_retry(session, "POST", url, files=files)
