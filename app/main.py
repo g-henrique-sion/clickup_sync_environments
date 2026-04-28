@@ -9,10 +9,15 @@ import logging
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
-from app.config.settings import WEBHOOK_SECRET, validate_config
+from app.config.settings import WEBHOOK_SECRETS, validate_config
 from app.core.logger import setup_logging
 from app.models.schemas import WebhookPayload
-from app.services.dedup import get_count
+from app.services.webhook_guard import (
+    get_runtime_webhook_secrets,
+    get_webhook_guard_stats,
+    start_webhook_guard,
+    stop_webhook_guard,
+)
 from app.services.webhook_queue import (
     enqueue_webhook,
     get_queue_stats,
@@ -31,6 +36,19 @@ app = FastAPI(
 )
 
 
+def _active_webhook_secrets() -> list[str]:
+    merged: list[str] = []
+    for secret in WEBHOOK_SECRETS:
+        secret_text = str(secret or "").strip()
+        if secret_text and secret_text not in merged:
+            merged.append(secret_text)
+    for secret in get_runtime_webhook_secrets():
+        secret_text = str(secret or "").strip()
+        if secret_text and secret_text not in merged:
+            merged.append(secret_text)
+    return merged
+
+
 @app.on_event("startup")
 async def startup() -> None:
     missing = validate_config()
@@ -39,13 +57,14 @@ async def startup() -> None:
         logger.error("Configure o .env e reinicie.")
     else:
         logger.info("clickup_sync_environments iniciado com sucesso.")
-        logger.info("Tasks ja clonadas (dedup): %d", get_count())
 
     await start_workers()
+    await start_webhook_guard()
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    await stop_webhook_guard()
     await stop_workers()
 
 
@@ -55,9 +74,9 @@ async def health():
     missing = validate_config()
     return {
         "status": "ok" if not missing else "misconfigured",
-        "cloned_count": get_count(),
         "missing_config": missing,
         **get_queue_stats(),
+        **get_webhook_guard_stats(),
     }
 
 
@@ -67,10 +86,17 @@ async def receive_webhook(request: Request):
     raw_body = await request.body()
 
     # Validacao de signature via HMAC-SHA256 (opcional)
-    if WEBHOOK_SECRET:
+    active_secrets = _active_webhook_secrets()
+    if active_secrets:
         signature = request.headers.get("X-Signature")
-        expected = hmac.new(WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature or "", expected):
+        is_valid = any(
+            hmac.compare_digest(
+                signature or "",
+                hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest(),
+            )
+            for secret in active_secrets
+        )
+        if not is_valid:
             logger.warning("Webhook recebido com signature invalida.")
             return Response(status_code=401)
 
@@ -85,7 +111,7 @@ async def receive_webhook(request: Request):
 
     # ClickUp envia um request de verificacao ao registrar o webhook
     if "event" not in body:
-        logger.info("Request de verificacao do ClickUp recebido.")
+        logger.debug("Request de verificacao do ClickUp recebido.")
         return {"status": "ok"}
 
     try:
@@ -99,6 +125,11 @@ async def receive_webhook(request: Request):
 
     # Filtra apenas eventos de status update
     if payload.event != "taskStatusUpdated":
+        logger.debug(
+            "Evento ignorado: event=%s task_id=%s motivo=not_status_update",
+            payload.event,
+            payload.task_id,
+        )
         return {"status": "ignored", "reason": "not a status update"}
 
     if not payload.task_id:
@@ -119,6 +150,11 @@ async def receive_webhook(request: Request):
         )
 
     if not enqueued:
+        logger.debug(
+            "Evento ignorado: task_id=%s status='%s' motivo=already_queued",
+            payload.task_id,
+            new_status,
+        )
         return {
             "status": "ignored",
             "reason": "already queued",
