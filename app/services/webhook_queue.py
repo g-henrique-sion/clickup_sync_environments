@@ -15,8 +15,10 @@ import unicodedata
 import uuid
 from dataclasses import asdict, dataclass
 
+import requests
+
 from app.config.settings import DATA_DIR, WEBHOOK_QUEUE_MAXSIZE, WEBHOOK_WORKERS
-from app.services.clone_service import process_status_change
+from app.services.clone_service import process_clickup_event
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +30,11 @@ _EVENTS_TMP_FILE = f"{_EVENTS_FILE}.tmp"
 class WebhookEvent:
     id: str
     task_id: str
+    event_type: str
     new_status: str
     normalized_status: str
+    old_status: str | None = None
+    status_changed_at_ms: int | None = None
     attempts: int = 0
     next_retry_at: float = 0.0
     created_at: float = 0.0
@@ -45,8 +50,9 @@ _store_loaded = False
 _started = False
 
 _events_by_id: dict[str, WebhookEvent] = {}
-_key_to_event_id: dict[tuple[str, str], str] = {}
+_key_to_event_id: dict[tuple[str, str, str], str] = {}
 _queued_event_ids: set[str] = set()
+_task_processing_locks: dict[str, asyncio.Lock] = {}
 
 
 def _normalize_status(status: str) -> str:
@@ -85,7 +91,18 @@ def _load_events_from_disk_locked() -> None:
             event = WebhookEvent(
                 id=str(item.get("id") or uuid.uuid4().hex),
                 task_id=str(item["task_id"]),
+                event_type=str(item.get("event_type") or "taskStatusUpdated"),
                 new_status=str(item["new_status"]),
+                old_status=(
+                    str(item["old_status"])
+                    if item.get("old_status") is not None
+                    else None
+                ),
+                status_changed_at_ms=(
+                    int(item["status_changed_at_ms"])
+                    if item.get("status_changed_at_ms") is not None
+                    else None
+                ),
                 normalized_status=str(
                     item.get("normalized_status") or _normalize_status(str(item["new_status"]))
                 ),
@@ -99,7 +116,7 @@ def _load_events_from_disk_locked() -> None:
         except Exception:
             continue
 
-        key = (event.task_id, event.normalized_status)
+        key = (event.task_id, event.event_type, event.normalized_status)
         if key in _key_to_event_id:
             # Mantem o mais recente em caso de duplicata no arquivo.
             continue
@@ -136,24 +153,69 @@ def _remove_event_locked(event_id: str) -> None:
     _queued_event_ids.discard(event_id)
     if not event:
         return
-    key = (event.task_id, event.normalized_status)
+    key = (event.task_id, event.event_type, event.normalized_status)
     _key_to_event_id.pop(key, None)
 
 
-def _remove_events_by_task_locked(task_id: str) -> list[str]:
-    """Remove eventos pendentes de uma task para manter apenas o mais recente."""
+def _remove_events_by_task_and_type_locked(task_id: str, event_type: str) -> list[str]:
+    """Remove eventos pendentes de uma task/tipo para manter apenas o mais recente."""
     removed_ids: list[str] = []
     for event_id, event in list(_events_by_id.items()):
         if event.task_id != task_id:
+            continue
+        if event.event_type != event_type:
             continue
         removed_ids.append(event_id)
         _remove_event_locked(event_id)
     return removed_ids
 
 
+def _get_task_processing_lock(task_id: str) -> asyncio.Lock:
+    lock = _task_processing_locks.get(task_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _task_processing_locks[task_id] = lock
+    return lock
+
+
 def _compute_retry_delay_seconds(attempts: int) -> float:
     # Backoff exponencial com teto de 5 minutos.
     return float(min(300, 2 ** min(attempts, 8)))
+
+
+def _extract_http_status_code(error: Exception) -> int | None:
+    status_attr = getattr(error, "status_code", None)
+    if status_attr is not None:
+        try:
+            return int(status_attr)
+        except Exception:
+            pass
+
+    if isinstance(error, requests.HTTPError) and error.response is not None:
+        try:
+            return int(error.response.status_code)
+        except Exception:
+            return None
+    return None
+
+
+def _is_non_retryable_error(
+    error: Exception,
+    *,
+    event_type: str,
+    attempts: int,
+) -> bool:
+    status = _extract_http_status_code(error)
+    if status in {400, 401, 403, 404, 422}:
+        return True
+
+    if status is None:
+        return False
+
+    # Mantido para legibilidade; com os status acima, nao chega aqui.
+    if event_type == "taskCreated":
+        return attempts >= 8
+    return attempts >= 3
 
 
 def _spawn_requeue_task(event_id: str, delay_seconds: float) -> None:
@@ -236,7 +298,14 @@ async def stop_workers() -> None:
     logger.debug("Workers de webhook finalizados.")
 
 
-async def enqueue_webhook(task_id: str, new_status: str) -> bool:
+async def enqueue_webhook(
+    task_id: str,
+    new_status: str,
+    *,
+    event_type: str = "taskStatusUpdated",
+    old_status: str | None = None,
+    status_changed_at_ms: int | None = None,
+) -> bool:
     """Enfileira evento de webhook para processamento assincrono duravel.
 
     Retorna:
@@ -244,7 +313,8 @@ async def enqueue_webhook(task_id: str, new_status: str) -> bool:
         False se ja havia evento equivalente pendente.
     """
     normalized_status = _normalize_status(new_status)
-    key = (task_id, normalized_status)
+    normalized_event = str(event_type or "").strip() or "taskStatusUpdated"
+    key = (task_id, normalized_event, normalized_status)
 
     needs_requeue = False
     event_id = ""
@@ -260,7 +330,9 @@ async def enqueue_webhook(task_id: str, new_status: str) -> bool:
             )
             return False
 
-        removed_ids = _remove_events_by_task_locked(task_id)
+        removed_ids: list[str] = []
+        if normalized_event == "taskStatusUpdated":
+            removed_ids = _remove_events_by_task_and_type_locked(task_id, normalized_event)
         if removed_ids:
             logger.debug(
                 "enqueue_webhook.coalesce task_id=%s removed_events=%s",
@@ -271,7 +343,10 @@ async def enqueue_webhook(task_id: str, new_status: str) -> bool:
         event = WebhookEvent(
             id=uuid.uuid4().hex,
             task_id=task_id,
+            event_type=normalized_event,
             new_status=new_status,
+            old_status=(str(old_status).strip() if old_status is not None else None),
+            status_changed_at_ms=(int(status_changed_at_ms) if status_changed_at_ms is not None else None),
             normalized_status=normalized_status,
             attempts=0,
             next_retry_at=0.0,
@@ -285,11 +360,13 @@ async def enqueue_webhook(task_id: str, new_status: str) -> bool:
         if not _try_enqueue_event_locked(event.id):
             needs_requeue = True
 
-    logger.debug(
-        "enqueue_webhook.ok task_id=%s status='%s' normalized='%s' event_id=%s pending=%d",
+    logger.info(
+        "enqueue_webhook.ok task_id=%s event=%s old_status='%s' status='%s' change_ms=%s event_id=%s pending=%d",
         task_id,
+        normalized_event,
+        old_status or "",
         new_status,
-        normalized_status,
+        status_changed_at_ms if status_changed_at_ms is not None else "",
         event_id,
         len(_events_by_id),
     )
@@ -318,99 +395,142 @@ def get_queue_stats() -> dict[str, int]:
 async def _worker_loop(worker_id: int) -> None:
     while True:
         item = await _queue.get()
-        if item is None:
-            _queue.task_done()
-            logger.info("Worker %d encerrado.", worker_id)
-            break
-
-        event_id = item
-        async with _store_lock:
-            _queued_event_ids.discard(event_id)
-            event = _events_by_id.get(event_id)
-
-        if not event:
-            logger.debug(
-                "worker.skip event_inexistente_ou_coalescido worker=%d event_id=%s",
-                worker_id,
-                event_id,
-            )
-            _queue.task_done()
-            continue
-
-        now = time.time()
-        if event.next_retry_at and now < event.next_retry_at:
-            logger.debug(
-                "worker.requeue_espera worker=%d event_id=%s task_id=%s status='%s' wait_s=%.1f",
-                worker_id,
-                event_id,
-                event.task_id,
-                event.new_status,
-                event.next_retry_at - now,
-            )
-            _spawn_requeue_task(event_id, delay_seconds=event.next_retry_at - now)
-            _queue.task_done()
-            continue
-
-        started = time.time()
-        logger.debug(
-            "worker.processando worker=%d event_id=%s task_id=%s status='%s' attempts=%d",
-            worker_id,
-            event_id,
-            event.task_id,
-            event.new_status,
-            event.attempts,
-        )
         try:
-            result = await asyncio.to_thread(
-                process_status_change,
-                event.task_id,
-                event.new_status,
-            )
-        except Exception as e:
-            attempts = event.attempts + 1
-            delay = _compute_retry_delay_seconds(attempts)
-            async with _store_lock:
-                current = _events_by_id.get(event_id)
-                if current:
-                    current.attempts = attempts
-                    current.last_error = str(e)
-                    current.next_retry_at = time.time() + delay
-                    _persist_events_locked()
+            if item is None:
+                logger.info("Worker %d encerrado.", worker_id)
+                break
 
-            logger.exception(
-                "worker.erro worker=%d event_id=%s task_id=%s status='%s' tentativa=%d retry_s=%.1f",
-                worker_id,
-                event_id,
-                event.task_id,
-                event.new_status,
-                attempts,
-                delay,
-            )
-            _spawn_requeue_task(event_id, delay_seconds=delay)
-        else:
+            event_id = item
             async with _store_lock:
-                _remove_event_locked(event_id)
-                _persist_events_locked()
-            elapsed = time.time() - started
-            if result is not None:
-                logger.info(
-                    "worker.ok worker=%d event_id=%s task_id=%s status='%s' elapsed_s=%.3f pending=%d",
-                    worker_id,
-                    event_id,
-                    event.task_id,
-                    event.new_status,
-                    elapsed,
-                    len(_events_by_id),
-                )
-            else:
+                _queued_event_ids.discard(event_id)
+                event = _events_by_id.get(event_id)
+
+            if not event:
                 logger.debug(
-                    "worker.ok_noop worker=%d event_id=%s task_id=%s status='%s' elapsed_s=%.3f pending=%d",
+                    "worker.skip event_inexistente_ou_coalescido worker=%d event_id=%s",
+                    worker_id,
+                    event_id,
+                )
+                continue
+
+            # Garante processamento serial por task para evitar corrida entre statuses.
+            task_lock = _get_task_processing_lock(event.task_id)
+            async with task_lock:
+                # Revalida evento ao entrar no lock, pois pode ter sido coalescido/descartado.
+                async with _store_lock:
+                    current_event = _events_by_id.get(event_id)
+                if not current_event:
+                    logger.debug(
+                        "worker.skip event_coalescido_pos_lock worker=%d event_id=%s",
+                        worker_id,
+                        event_id,
+                    )
+                    continue
+                event = current_event
+
+                now = time.time()
+                if event.next_retry_at and now < event.next_retry_at:
+                    logger.debug(
+                    "worker.requeue_espera worker=%d event_id=%s task_id=%s status='%s' wait_s=%.1f",
                     worker_id,
                     event_id,
                     event.task_id,
                     event.new_status,
-                    elapsed,
-                    len(_events_by_id),
+                        event.next_retry_at - now,
+                    )
+                    _spawn_requeue_task(event_id, delay_seconds=event.next_retry_at - now)
+                    continue
+
+                started = time.time()
+                logger.debug(
+                    "worker.processando worker=%d event_id=%s task_id=%s event=%s old_status='%s' status='%s' change_ms=%s attempts=%d",
+                    worker_id,
+                    event_id,
+                    event.task_id,
+                    event.event_type,
+                    event.old_status or "",
+                    event.new_status,
+                    event.status_changed_at_ms if event.status_changed_at_ms is not None else "",
+                    event.attempts,
                 )
+                try:
+                    result = await asyncio.to_thread(
+                        process_clickup_event,
+                        event.task_id,
+                        event.event_type,
+                        event.new_status,
+                        event.old_status,
+                        event.status_changed_at_ms,
+                    )
+                except Exception as e:
+                    if _is_non_retryable_error(
+                        e,
+                        event_type=event.event_type,
+                        attempts=event.attempts + 1,
+                    ):
+                        status = _extract_http_status_code(e)
+                        async with _store_lock:
+                            _remove_event_locked(event_id)
+                            _persist_events_locked()
+                        logger.warning(
+                            "worker.drop_non_retryable worker=%d event_id=%s task_id=%s event=%s status_evento='%s' http_status=%s pending=%d",
+                            worker_id,
+                            event_id,
+                            event.task_id,
+                            event.event_type,
+                            event.new_status,
+                            status,
+                            len(_events_by_id),
+                        )
+                        continue
+
+                    attempts = event.attempts + 1
+                    delay = _compute_retry_delay_seconds(attempts)
+                    async with _store_lock:
+                        current = _events_by_id.get(event_id)
+                        if current:
+                            current.attempts = attempts
+                            current.last_error = str(e)
+                            current.next_retry_at = time.time() + delay
+                            _persist_events_locked()
+
+                    logger.exception(
+                        "worker.erro worker=%d event_id=%s task_id=%s event=%s status='%s' tentativa=%d retry_s=%.1f",
+                        worker_id,
+                        event_id,
+                        event.task_id,
+                        event.event_type,
+                        event.new_status,
+                        attempts,
+                        delay,
+                    )
+                    _spawn_requeue_task(event_id, delay_seconds=delay)
+                else:
+                    async with _store_lock:
+                        _remove_event_locked(event_id)
+                        _persist_events_locked()
+                    elapsed = time.time() - started
+                    if result is not None:
+                        logger.info(
+                            "worker.ok worker=%d event_id=%s task_id=%s event=%s status='%s' elapsed_s=%.3f pending=%d",
+                            worker_id,
+                            event_id,
+                            event.task_id,
+                            event.event_type,
+                            event.new_status,
+                            elapsed,
+                            len(_events_by_id),
+                        )
+                    else:
+                        logger.info(
+                            "worker.noop worker=%d event_id=%s task_id=%s event=%s status='%s' elapsed_s=%.3f pending=%d",
+                            worker_id,
+                            event_id,
+                            event.task_id,
+                            event.event_type,
+                            event.new_status,
+                            elapsed,
+                            len(_events_by_id),
+                        )
         finally:
             _queue.task_done()

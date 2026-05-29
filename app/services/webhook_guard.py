@@ -19,6 +19,7 @@ from app.config.settings import (
     WEBHOOK_GUARD_ENABLED,
     WEBHOOK_GUARD_FAIL_COUNT_THRESHOLD,
     WEBHOOK_GUARD_INTERVAL_SECONDS,
+    WEBHOOK_GUARD_PERSIST_SECRETS,
     WEBHOOK_GUARD_RECREATE_UNHEALTHY,
     WEBHOOK_GUARD_ROTATE_IF_SECRET_UNKNOWN,
     WEBHOOK_SECRETS,
@@ -126,6 +127,8 @@ def _pick_primary_webhook(candidates: list[dict]) -> dict | None:
 
 
 def _load_state_file() -> dict[str, str]:
+    if not WEBHOOK_GUARD_PERSIST_SECRETS:
+        return {}
     if not os.path.exists(_STATE_FILE):
         return {}
     try:
@@ -147,6 +150,8 @@ def _load_state_file() -> dict[str, str]:
 
 
 def _persist_state_file(secret_map: dict[str, str]) -> None:
+    if not WEBHOOK_GUARD_PERSIST_SECRETS:
+        return
     os.makedirs(DATA_DIR, exist_ok=True)
     payload = {
         "updated_at": int(time.time()),
@@ -437,6 +442,7 @@ def get_webhook_guard_stats() -> dict:
     """Metricas do monitor para /health."""
     return {
         "webhook_guard_enabled": WEBHOOK_GUARD_ENABLED,
+        "webhook_guard_persist_secrets": WEBHOOK_GUARD_PERSIST_SECRETS,
         "webhook_guard_running": _guard_running,
         "webhook_guard_endpoint": WEBHOOK_ENDPOINT,
         "webhook_guard_teams": WEBHOOK_TEAM_IDS,

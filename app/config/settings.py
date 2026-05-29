@@ -35,7 +35,7 @@ def _parse_json_mapping(raw_value: str, var_name: str) -> dict[str, str]:
 
 
 def _parse_csv_values(raw_value: str) -> list[str]:
-    """Parseia lista CSV em formato simples, removendo vazios e espacos."""
+    """Parseia lista CSV simples removendo vazios e espacos extras."""
     if not raw_value:
         return []
     return [part.strip() for part in raw_value.split(",") if part.strip()]
@@ -72,10 +72,8 @@ def _parse_float(raw_value: str | None, default: float, var_name: str) -> float:
     return float(_parse_number(raw_value, default, float, var_name))
 
 
-# Origem unica monitorada
-# Lista: https://app.clickup.com/90171084182/v/li/901713154569
-# Trigger: cooperado aprovado
-SOURCE_LIST_ID: str = os.getenv("SOURCE_LIST_ID", "901713154569").strip()
+# Origem monitorada (automacao source -> destino)
+SOURCE_LIST_ID: str = os.getenv("SOURCE_LIST_ID", "").strip()
 SOURCE_TRIGGER_STATUS: str = os.getenv(
     "SOURCE_TRIGGER_STATUS", "cooperado aprovado"
 ).strip().lower()
@@ -85,25 +83,26 @@ SOURCE_LIST_MAP = (
     else {}
 )
 
-# Retorno entre destino e source de retrabalho
-SOURCE_RETURN_LIST_ID: str = os.getenv("SOURCE_RETURN_LIST_ID", "901712728189").strip()
+# Retrabalho entre destino e source retorno
+SOURCE_RETURN_LIST_ID: str = os.getenv("SOURCE_RETURN_LIST_ID", "").strip()
 DEST_RETURN_TRIGGER_STATUS: str = os.getenv(
-    "DEST_RETURN_TRIGGER_STATUS", "pendencias"
+    "DEST_RETURN_TRIGGER_STATUS", "pend. comercial"
 ).strip().lower()
 SOURCE_RETURN_TRIGGER_STATUS: str = os.getenv(
     "SOURCE_RETURN_TRIGGER_STATUS", "corrigido"
 ).strip().lower()
 
-# Sincronismo de status entre listas no workspace destino
+# Sync interno bilateral (ongoing <-> onboarding)
 ONGOING_SYNC_LIST_ID: str = os.getenv(
     "ONGOING_SYNC_LIST_ID",
-    os.getenv("DEST_SYNC_LIST_A_ID", "901326789506"),
+    os.getenv("DEST_SYNC_LIST_A_ID", ""),
 ).strip()
 ONBOARDING_SYNC_LIST_ID: str = os.getenv(
     "ONBOARDING_SYNC_LIST_ID",
-    os.getenv("DEST_SYNC_LIST_B_ID", "901326986645"),
+    os.getenv("DEST_SYNC_LIST_B_ID", ""),
 ).strip()
 
+# Sync interno entre Planejamento Black <-> Onboarding Black
 PLANEJAMENTO_BLACK_SYNC_LIST_ID: str = os.getenv(
     "PLANEJAMENTO_BLACK_SYNC_LIST_ID",
     "",
@@ -115,9 +114,136 @@ ONBOARDING_BLACK_SYNC_LIST_ID: str = os.getenv(
 BLACK_SYNC_ALLOWED_STATUSES: list[str] = _parse_csv_values(
     os.getenv(
         "BLACK_SYNC_ALLOWED_STATUSES",
-        "1ª fatura sem inj,1ª fatura com desconto",
+        "1a fatura sem inj,1a fatura com desconto",
     )
 )
+_BLACK_SYNC_STATUS_MAP_DEFAULT = {
+    "Troca Solicitada": "Agendamento TT",
+    "Titularidade Alterada": "Troca de TT",
+    "Cadastrado na Usina": "Cadastro aprovado",
+}
+BLACK_SYNC_STATUS_MAP: dict[str, str] = _parse_json_mapping(
+    os.getenv(
+        "BLACK_SYNC_STATUS_MAP",
+        json.dumps(_BLACK_SYNC_STATUS_MAP_DEFAULT, ensure_ascii=False),
+    ),
+    "BLACK_SYNC_STATUS_MAP",
+)
+if not BLACK_SYNC_STATUS_MAP:
+    BLACK_SYNC_STATUS_MAP = dict(_BLACK_SYNC_STATUS_MAP_DEFAULT)
+
+# Notificacao em comentarios para listas de onboarding
+_onboarding_notify_default_lists = ",".join(
+    [
+        value
+        for value in [ONBOARDING_SYNC_LIST_ID, ONBOARDING_BLACK_SYNC_LIST_ID]
+        if str(value).strip()
+    ]
+)
+ONBOARDING_NOTIFY_ENABLED: bool = _parse_bool(
+    os.getenv("ONBOARDING_NOTIFY_ENABLED"),
+    default=True,
+)
+ONBOARDING_NOTIFY_LIST_IDS: list[str] = _parse_csv_values(
+    os.getenv("ONBOARDING_NOTIFY_LIST_IDS", _onboarding_notify_default_lists)
+)
+ONBOARDING_NOTIFY_USER_ID: str = os.getenv(
+    "ONBOARDING_NOTIFY_USER_ID",
+    "111955186",
+).strip()
+ONBOARDING_NOTIFY_USER_NAME: str = os.getenv(
+    "ONBOARDING_NOTIFY_USER_NAME",
+    "Markson Fernandes",
+).strip()
+ONBOARDING_NOTIFY_USER_IDS: list[str] = _parse_csv_values(
+    os.getenv("ONBOARDING_NOTIFY_USER_IDS", ONBOARDING_NOTIFY_USER_ID)
+)
+ONBOARDING_NOTIFY_USER_NAMES: list[str] = _parse_csv_values(
+    os.getenv("ONBOARDING_NOTIFY_USER_NAMES", ONBOARDING_NOTIFY_USER_NAME)
+)
+
+# Preencher campo "inicio de operacao" ao entrar em Ativo
+_ativo_inicio_operacao_default_lists = ",".join(
+    [
+        value
+        for value in [ONGOING_SYNC_LIST_ID, ONBOARDING_SYNC_LIST_ID]
+        if str(value).strip()
+    ]
+)
+ATIVO_INICIO_OPERACAO_ENABLED: bool = _parse_bool(
+    os.getenv("ATIVO_INICIO_OPERACAO_ENABLED"),
+    default=True,
+)
+ATIVO_INICIO_OPERACAO_LIST_IDS: list[str] = _parse_csv_values(
+    os.getenv("ATIVO_INICIO_OPERACAO_LIST_IDS", _ativo_inicio_operacao_default_lists)
+)
+ATIVO_INICIO_OPERACAO_TRIGGER_STATUS: str = os.getenv(
+    "ATIVO_INICIO_OPERACAO_TRIGGER_STATUS",
+    "ativo",
+).strip().lower()
+ATIVO_INICIO_OPERACAO_FIELD_ID: str = os.getenv(
+    "ATIVO_INICIO_OPERACAO_FIELD_ID",
+    "ebd051a1-d5b6-4cb1-861b-574a1f968663",
+).strip()
+
+# Roteamento de auditoria por plano de adesao (auditoria -> onboarding/black)
+AUDITORIA_ROUTING_SOURCE_LIST_IDS: list[str] = _parse_csv_values(
+    os.getenv("AUDITORIA_ROUTING_SOURCE_LIST_IDS", DEST_LIST_ID)
+)
+AUDITORIA_ROUTING_TRIGGER_STATUS: str = os.getenv(
+    "AUDITORIA_ROUTING_TRIGGER_STATUS",
+    "auditoria",
+).strip().lower()
+AUDITORIA_ROUTING_PLAN_FIELD_ID: str = os.getenv(
+    "AUDITORIA_ROUTING_PLAN_FIELD_ID",
+    "0e009719-1e94-482a-825a-c359e268727e",
+).strip()
+AUDITORIA_ROUTING_BLACK_VALUES: list[str] = _parse_csv_values(
+    os.getenv(
+        "AUDITORIA_ROUTING_BLACK_VALUES",
+        "Black Linear 25%,BLACK,Performance 15% (COPEL/CELESC),Max 25% (COPEL/CELESC)",
+    )
+)
+AUDITORIA_ROUTING_ONBOARDING_LIST_ID: str = os.getenv(
+    "AUDITORIA_ROUTING_ONBOARDING_LIST_ID",
+    ONBOARDING_SYNC_LIST_ID,
+).strip()
+AUDITORIA_ROUTING_ONBOARDING_BLACK_LIST_ID: str = os.getenv(
+    "AUDITORIA_ROUTING_ONBOARDING_BLACK_LIST_ID",
+    ONBOARDING_BLACK_SYNC_LIST_ID,
+).strip()
+AUDITORIA_ROUTING_ONBOARDING_NEW_TASK_STATUS: str = os.getenv(
+    "AUDITORIA_ROUTING_ONBOARDING_NEW_TASK_STATUS",
+    "telefone etapa 1",
+).strip()
+
+# Roteamento de auditoria para rateio (auditoria -> ongoing/planejamento black)
+AUDITORIA_RATEIO_TRIGGER_STATUS: str = os.getenv(
+    "AUDITORIA_RATEIO_TRIGGER_STATUS",
+    "enviado para rateio",
+).strip().lower()
+AUDITORIA_RATEIO_ONGOING_LIST_ID: str = os.getenv(
+    "AUDITORIA_RATEIO_ONGOING_LIST_ID",
+    ONGOING_SYNC_LIST_ID,
+).strip()
+AUDITORIA_RATEIO_BLACK_LIST_ID: str = os.getenv(
+    "AUDITORIA_RATEIO_BLACK_LIST_ID",
+    PLANEJAMENTO_BLACK_SYNC_LIST_ID,
+).strip()
+
+# Automacao de criacao (Adesao Reprovada -> Demissoes)
+ADESAO_REPROVADA_LIST_ID: str = os.getenv(
+    "ADESAO_REPROVADA_LIST_ID",
+    "",
+).strip()
+DEMISSOES_LIST_ID: str = os.getenv(
+    "DEMISSOES_LIST_ID",
+    "",
+).strip()
+DEMISSOES_CREATE_STATUS: str = os.getenv(
+    "DEMISSOES_CREATE_STATUS",
+    "to do",
+).strip()
 
 DEST_SYNC_ALLOWED_STATUSES: list[str] = _parse_csv_values(
     os.getenv(
@@ -130,6 +256,27 @@ DEST_SYNC_ALLOWED_STATUSES: list[str] = _parse_csv_values(
 CLONE_FIELD_MAP = _parse_json_mapping(
     os.getenv("CLONE_FIELD_MAP", "{}"), "CLONE_FIELD_MAP"
 )
+ENV_SYNC_USE_DIRECT_FIELDS: bool = _parse_bool(
+    os.getenv("ENV_SYNC_USE_DIRECT_FIELDS"),
+    default=True,
+)
+
+# Task name formatter (reutilizavel para multiplas listas)
+TASK_NAME_FORMAT_LIST_IDS: list[str] = _parse_csv_values(
+    os.getenv("TASK_NAME_FORMAT_LIST_IDS", DEST_LIST_ID)
+)
+TASK_NAME_RAZAO_FIELD_ID: str = os.getenv(
+    "TASK_NAME_RAZAO_FIELD_ID",
+    "dfb0de9b-121a-4bf6-977f-dfb5eec523cb",
+).strip()
+TASK_NAME_UC_FIELD_ID: str = os.getenv(
+    "TASK_NAME_UC_FIELD_ID",
+    "abb7e1e9-3c99-4044-b20c-5eb19575a6d5",
+).strip()
+TASK_NAME_TEMPLATE: str = os.getenv(
+    "TASK_NAME_TEMPLATE",
+    "{razao} - UC {uc}",
+).strip()
 
 # Servidor
 PORT: int = int(os.getenv("PORT", "8000"))
@@ -144,11 +291,9 @@ if WEBHOOK_SECRET and WEBHOOK_SECRET not in WEBHOOK_SECRETS:
     WEBHOOK_SECRETS.insert(0, WEBHOOK_SECRET)
 WEBHOOK_WORKERS: int = max(1, int(os.getenv("WEBHOOK_WORKERS", "4")))
 WEBHOOK_QUEUE_MAXSIZE: int = max(100, int(os.getenv("WEBHOOK_QUEUE_MAXSIZE", "2000")))
-WEBHOOK_TEAM_IDS: list[str] = _parse_csv_values(
-    os.getenv("WEBHOOK_TEAM_IDS", "90171084182,9013290037")
-)
+WEBHOOK_TEAM_IDS: list[str] = _parse_csv_values(os.getenv("WEBHOOK_TEAM_IDS", ""))
 WEBHOOK_EXPECTED_EVENTS: list[str] = _parse_csv_values(
-    os.getenv("WEBHOOK_EXPECTED_EVENTS", "taskStatusUpdated")
+    os.getenv("WEBHOOK_EXPECTED_EVENTS", "taskStatusUpdated,taskCreated")
 )
 WEBHOOK_GUARD_ENABLED: bool = _parse_bool(
     os.getenv("WEBHOOK_GUARD_ENABLED"),
@@ -184,6 +329,10 @@ WEBHOOK_GUARD_DELETE_DUPLICATES: bool = _parse_bool(
 )
 WEBHOOK_GUARD_ROTATE_IF_SECRET_UNKNOWN: bool = _parse_bool(
     os.getenv("WEBHOOK_GUARD_ROTATE_IF_SECRET_UNKNOWN"),
+    default=False,
+)
+WEBHOOK_GUARD_PERSIST_SECRETS: bool = _parse_bool(
+    os.getenv("WEBHOOK_GUARD_PERSIST_SECRETS"),
     default=False,
 )
 
@@ -245,7 +394,7 @@ CLICKUP_HTTP_POOL_MAXSIZE: int = max(
     ),
 )
 
-# Deduplicacao por campos de negocio (origem)
+# Legado (nao utilizado no fluxo atual)
 DEDUP_NAME_SOURCE_FIELD_ID: str = os.getenv(
     "DEDUP_NAME_SOURCE_FIELD_ID", "91f5b947-7c0a-4025-9b2b-06a6dac51651"
 )
@@ -253,24 +402,25 @@ DEDUP_UC_SOURCE_FIELD_ID: str = os.getenv(
     "DEDUP_UC_SOURCE_FIELD_ID", "0ed5e250-d5f0-42d7-bee0-67c8acf14a79"
 )
 
-# Persistencia de dedup
+# Persistencia local
 DATA_DIR: str = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data"
 )
 
-# Validacao
+# Validacao obrigatoria de runtime
 _REQUIRED = {
     "SOURCE_CLICKUP_TOKEN": SOURCE_CLICKUP_TOKEN,
     "DEST_CLICKUP_TOKEN": DEST_CLICKUP_TOKEN,
     "SOURCE_LIST_MAP": bool(SOURCE_LIST_MAP),
+    "SOURCE_RETURN_LIST_ID": SOURCE_RETURN_LIST_ID,
     "DEST_LIST_ID": DEST_LIST_ID,
 }
 
 
 def validate_config() -> list[str]:
-    """Retorna lista de variaveis obrigatorias que estao faltando."""
-    missing = []
-    for k, v in _REQUIRED.items():
-        if not v:
-            missing.append(k)
+    """Retorna lista de variaveis obrigatorias ausentes."""
+    missing: list[str] = []
+    for key, value in _REQUIRED.items():
+        if not value:
+            missing.append(key)
     return missing
