@@ -54,9 +54,10 @@ async def startup() -> None:
     missing = validate_config()
     if missing:
         logger.error("Variaveis obrigatorias faltando: %s", ", ".join(missing))
-        logger.error("Configure o .env e reinicie.")
-    else:
-        logger.info("clickup_sync_environments iniciado com sucesso.")
+        logger.error("Configuracao invalida. Startup abortado.")
+        raise RuntimeError(f"Configuracao obrigatoria ausente: {', '.join(missing)}")
+
+    logger.info("clickup_sync_environments iniciado com sucesso.")
 
     await start_workers()
     await start_webhook_guard()
@@ -123,26 +124,40 @@ async def receive_webhook(request: Request):
             content={"status": "error", "detail": "invalid payload"},
         )
 
-    # Filtra apenas eventos de status update
-    if payload.event != "taskStatusUpdated":
+    # Filtra eventos suportados
+    if payload.event not in {"taskStatusUpdated", "taskCreated"}:
         logger.debug(
-            "Evento ignorado: event=%s task_id=%s motivo=not_status_update",
+            "Evento ignorado: event=%s task_id=%s motivo=not_supported",
             payload.event,
             payload.task_id,
         )
-        return {"status": "ignored", "reason": "not a status update"}
+        return {"status": "ignored", "reason": "not supported"}
 
     if not payload.task_id:
-        logger.warning("Evento taskStatusUpdated sem task_id.")
+        logger.warning("Evento %s sem task_id.", payload.event)
         return {"status": "ignored", "reason": "no task_id"}
 
-    new_status = payload.get_new_status()
-    if not new_status:
-        logger.warning("Evento de status sem novo status no history_items.")
-        return {"status": "ignored", "reason": "no status in history"}
+    if payload.event == "taskStatusUpdated":
+        new_status = payload.get_new_status()
+        old_status = payload.get_old_status()
+        status_changed_at_ms = payload.get_status_change_date_ms()
+        if not new_status:
+            logger.warning("Evento de status sem novo status no history_items.")
+            return {"status": "ignored", "reason": "no status in history"}
+    else:
+        # Mantido para compatibilidade de fila de eventos, sem uso semantico.
+        new_status = "__task_created__"
+        old_status = None
+        status_changed_at_ms = None
 
     try:
-        enqueued = await enqueue_webhook(payload.task_id, new_status)
+        enqueued = await enqueue_webhook(
+            payload.task_id,
+            new_status,
+            event_type=payload.event,
+            old_status=old_status,
+            status_changed_at_ms=status_changed_at_ms,
+        )
     except asyncio.QueueFull:
         return JSONResponse(
             status_code=503,
@@ -151,8 +166,9 @@ async def receive_webhook(request: Request):
 
     if not enqueued:
         logger.debug(
-            "Evento ignorado: task_id=%s status='%s' motivo=already_queued",
+            "Evento ignorado: task_id=%s event=%s status='%s' motivo=already_queued",
             payload.task_id,
+            payload.event,
             new_status,
         )
         return {
@@ -161,11 +177,23 @@ async def receive_webhook(request: Request):
             "source_task_id": payload.task_id,
         }
 
+    logger.info(
+        "Evento enfileirado: task_id=%s event=%s old_status='%s' status='%s' change_ms=%s",
+        payload.task_id,
+        payload.event,
+        old_status or "",
+        new_status,
+        status_changed_at_ms if status_changed_at_ms is not None else "",
+    )
+
     return JSONResponse(
         status_code=202,
         content={
             "status": "queued",
             "source_task_id": payload.task_id,
+            "event": payload.event,
+            "old_status": old_status,
             "new_status": new_status,
+            "status_changed_at_ms": status_changed_at_ms,
         },
     )

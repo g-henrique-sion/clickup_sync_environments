@@ -8,3 +8,4 @@ data/cloned_tasks.json
 .vscode/
 *.log
 data/
+.tools/
