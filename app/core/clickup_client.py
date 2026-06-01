@@ -1483,11 +1483,6 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
         if value is None:
             continue
 
-        dest_cf_id = (
-            src_cf_id
-            if ENV_SYNC_USE_DIRECT_FIELDS
-            else source_to_dest_field_map.get(src_cf_id)
-        )
         items: list[dict] = []
         if isinstance(value, list):
             items = [v for v in value if isinstance(v, dict)]
@@ -1512,30 +1507,9 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
             temp_path, content_type = _download_attachment_to_temp(url, filename)
             try:
                 sent = False
-
-                if dest_cf_id:
-                    uploaded_id = _upload_custom_field_attachment(
-                        dest_cf_id, temp_path, filename, content_type
-                    )
-                    if uploaded_id:
-                        try:
-                            _set_custom_field_value(
-                                dest_task_id,
-                                dest_cf_id,
-                                {"add": [uploaded_id]},
-                            )
-                            sent = True
-                        except Exception as e:
-                            logger.warning(
-                                "Falha ao associar anexo ao campo destino %s: %s",
-                                dest_cf_id,
-                                e,
-                            )
-
-                if not sent:
-                    ok = _upload_task_attachment(dest_task_id, temp_path, filename, content_type)
-                    if ok:
-                        sent = True
+                ok = _upload_task_attachment(dest_task_id, temp_path, filename, content_type)
+                if ok:
+                    sent = True
 
                 if sent:
                     sent_count += 1
@@ -1551,8 +1525,8 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
 
     # Fallback importante para roundtrip:
     # quando a task origem nao possui mais os custom fields de anexo
-    # (ex.: lista intermediaria), reaproveita anexos de task pelo nome do campo.
-    dest_field_by_name = _get_dest_attachment_field_name_map()
+    # (ex.: lista intermediaria), preserva anexos task-level somente como
+    # anexos da task (sem inferir campo por nome de arquivo).
     task_level_attachments = source_task.get("attachments", []) or []
     for att in task_level_attachments:
         url = _select_attachment_url(att)
@@ -1564,35 +1538,13 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
         if filename in sent_filenames:
             continue
         attempted_count += 1
-        inferred_name = _extract_field_name_from_attachment_filename(filename)
-        dest_cf_id = dest_field_by_name.get(inferred_name)
 
         temp_path, content_type = _download_attachment_to_temp(url, filename)
         try:
             sent = False
-            if dest_cf_id:
-                uploaded_id = _upload_custom_field_attachment(
-                    dest_cf_id, temp_path, filename, content_type
-                )
-                if uploaded_id:
-                    try:
-                        _set_custom_field_value(
-                            dest_task_id,
-                            dest_cf_id,
-                            {"add": [uploaded_id]},
-                        )
-                        sent = True
-                    except Exception as e:
-                        logger.warning(
-                            "Falha ao associar anexo de fallback ao campo destino %s: %s",
-                            dest_cf_id,
-                            e,
-                        )
-
-            if not sent:
-                ok = _upload_task_attachment(dest_task_id, temp_path, filename, content_type)
-                if ok:
-                    sent = True
+            ok = _upload_task_attachment(dest_task_id, temp_path, filename, content_type)
+            if ok:
+                sent = True
 
             if sent:
                 sent_count += 1
@@ -1624,8 +1576,6 @@ def clone_attachments_dest_to_source(
     dest_task: dict, source_task_id: str
 ) -> dict[str, int | bool]:
     """Clona anexos do destino para source via custom fields mapeados (com fallback)."""
-    dest_to_source_field_map = _get_dest_to_source_field_map()
-
     dest_custom_fields = {
         str(cf.get("id")): cf for cf in (dest_task.get("custom_fields", []) or [])
     }
@@ -1670,36 +1620,11 @@ def clone_attachments_dest_to_source(
             temp_path, content_type = _download_attachment_to_temp_from_dest(url, filename)
             try:
                 sent = False
-                source_cf_id = (
-                    dest_cf_id
-                    if ENV_SYNC_USE_DIRECT_FIELDS
-                    else dest_to_source_field_map.get(dest_cf_id)
+                ok = _upload_task_attachment_to_source(
+                    source_task_id, temp_path, filename, content_type
                 )
-                if source_cf_id:
-                    uploaded_id = _upload_custom_field_attachment_to_source(
-                        source_cf_id, temp_path, filename, content_type
-                    )
-                    if uploaded_id:
-                        try:
-                            _set_custom_field_value_in_source(
-                                source_task_id,
-                                source_cf_id,
-                                {"add": [uploaded_id]},
-                            )
-                            sent = True
-                        except Exception as e:
-                            logger.warning(
-                                "Falha ao associar anexo ao campo source %s: %s",
-                                source_cf_id,
-                                e,
-                            )
-
-                if not sent:
-                    ok = _upload_task_attachment_to_source(
-                        source_task_id, temp_path, filename, content_type
-                    )
-                    if ok:
-                        sent = True
+                if ok:
+                    sent = True
 
                 if sent:
                     sent_count += 1
@@ -1718,8 +1643,7 @@ def clone_attachments_dest_to_source(
                     logger.debug("Falha ao remover arquivo temporario: %s", temp_path)
 
     # Fallback para anexos task-level no destino:
-    # preserva anexos sem mapeamento de campo source.
-    source_field_by_name = _get_source_attachment_field_name_map()
+    # preserva anexos como anexos da task source (sem inferir campo por nome).
     task_level_attachments = dest_task.get("attachments", []) or []
     for att in task_level_attachments:
         url = _select_attachment_url(att)
@@ -1731,37 +1655,15 @@ def clone_attachments_dest_to_source(
         if filename in sent_filenames:
             continue
         attempted_count += 1
-        inferred_name = _extract_field_name_from_attachment_filename(filename)
-        source_cf_id = source_field_by_name.get(inferred_name)
 
         temp_path, content_type = _download_attachment_to_temp_from_dest(url, filename)
         try:
             sent = False
-            if source_cf_id:
-                uploaded_id = _upload_custom_field_attachment_to_source(
-                    source_cf_id, temp_path, filename, content_type
-                )
-                if uploaded_id:
-                    try:
-                        _set_custom_field_value_in_source(
-                            source_task_id,
-                            source_cf_id,
-                            {"add": [uploaded_id]},
-                        )
-                        sent = True
-                    except Exception as e:
-                        logger.warning(
-                            "Falha ao associar anexo de fallback ao campo source %s: %s",
-                            source_cf_id,
-                            e,
-                        )
-
-            if not sent:
-                ok = _upload_task_attachment_to_source(
-                    source_task_id, temp_path, filename, content_type
-                )
-                if ok:
-                    sent = True
+            ok = _upload_task_attachment_to_source(
+                source_task_id, temp_path, filename, content_type
+            )
+            if ok:
+                sent = True
 
             if sent:
                 sent_count += 1
