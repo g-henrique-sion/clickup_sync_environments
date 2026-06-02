@@ -9,6 +9,7 @@ import tempfile
 import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -452,6 +453,39 @@ def _guess_attachment_filename(att: dict) -> str:
     if ext and not name.lower().endswith(f".{ext.lower()}"):
         name = f"{name}.{ext}"
     return name
+
+
+def _normalize_attachment_url(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urlsplit(text)
+        path = re.sub(r"/+", "/", parsed.path or "")
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+    except Exception:
+        return text.split("?", 1)[0].strip()
+
+
+def _build_attachment_identity_keys(att: dict) -> set[str]:
+    keys: set[str] = set()
+
+    attachment_id = str(att.get("id") or "").strip().lower()
+    if attachment_id:
+        keys.add(f"id:{attachment_id}")
+
+    normalized_url = _normalize_attachment_url(_select_attachment_url(att))
+    if normalized_url:
+        keys.add(f"url:{normalized_url}")
+
+    filename = _normalize_attachment_name(_guess_attachment_filename(att))
+    size = str(att.get("size") or "").strip()
+    if filename and size:
+        keys.add(f"file:{filename}:{size}")
+    elif filename:
+        keys.add(f"file:{filename}")
+
+    return keys
 
 
 def _build_custom_field_attachment_filename(cf: dict, task_name: str, item: dict) -> str:
@@ -1460,18 +1494,18 @@ def build_reverse_custom_fields_payload(dest_task: dict) -> list[dict]:
 
 
 def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | bool]:
-    """Clona anexos de custom fields para custom fields destino (com fallback)."""
+    """Clona anexos preservando campo->campo e task-only->task sem duplicar."""
     source_custom_fields = {
         str(cf.get("id")): cf for cf in (source_task.get("custom_fields", []) or [])
     }
     source_to_dest_field_map = _get_source_to_dest_field_map()
-    source_task_name = source_task.get("name", "Sem nome")
 
     sent_count = 0
     attempted_count = 0
     failed_count = 0
     skipped_no_url_count = 0
-    sent_filenames: set[str] = set()
+    field_identity_keys: set[str] = set()
+    sent_identity_keys: set[str] = set()
     source_attachment_fields = [
         (source_cf_id, cf)
         for source_cf_id, cf in source_custom_fields.items()
@@ -1483,6 +1517,11 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
         if value is None:
             continue
 
+        dest_cf_id = (
+            src_cf_id
+            if ENV_SYNC_USE_DIRECT_FIELDS
+            else source_to_dest_field_map.get(src_cf_id)
+        )
         items: list[dict] = []
         if isinstance(value, list):
             items = [v for v in value if isinstance(v, dict)]
@@ -1497,23 +1536,46 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
             continue
 
         for item in items:
+            identity_keys = _build_attachment_identity_keys(item)
+            field_identity_keys.update(identity_keys)
             url = _select_attachment_url(item)
             if not url:
                 logger.warning("Campo %s possui item sem URL de download. Ignorando.", src_cf_id)
                 skipped_no_url_count += 1
                 continue
             attempted_count += 1
-            filename = _build_custom_field_attachment_filename(cf, source_task_name, item)
+            filename = _guess_attachment_filename(item)
             temp_path, content_type = _download_attachment_to_temp(url, filename)
             try:
                 sent = False
-                ok = _upload_task_attachment(dest_task_id, temp_path, filename, content_type)
-                if ok:
-                    sent = True
+                if dest_cf_id:
+                    uploaded_id = _upload_custom_field_attachment(
+                        dest_cf_id, temp_path, filename, content_type
+                    )
+                    if uploaded_id:
+                        try:
+                            _set_custom_field_value(
+                                dest_task_id,
+                                dest_cf_id,
+                                {"add": [uploaded_id]},
+                            )
+                            sent = True
+                        except Exception as e:
+                            logger.warning(
+                                "Falha ao associar anexo ao campo destino %s: %s",
+                                dest_cf_id,
+                                e,
+                            )
+                else:
+                    logger.warning(
+                        "Campo de anexo sem mapeamento de destino. source_field_id=%s filename=%s",
+                        src_cf_id,
+                        filename,
+                    )
 
                 if sent:
                     sent_count += 1
-                    sent_filenames.add(filename)
+                    sent_identity_keys.update(identity_keys)
                 else:
                     failed_count += 1
                     logger.warning("Falha ao enviar anexo do campo %s: %s", src_cf_id, filename)
@@ -1529,14 +1591,17 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
     # anexos da task (sem inferir campo por nome de arquivo).
     task_level_attachments = source_task.get("attachments", []) or []
     for att in task_level_attachments:
+        identity_keys = _build_attachment_identity_keys(att)
+        if identity_keys and identity_keys.intersection(field_identity_keys):
+            continue
+        if identity_keys and identity_keys.intersection(sent_identity_keys):
+            continue
         url = _select_attachment_url(att)
         if not url:
             skipped_no_url_count += 1
             continue
 
         filename = _guess_attachment_filename(att)
-        if filename in sent_filenames:
-            continue
         attempted_count += 1
 
         temp_path, content_type = _download_attachment_to_temp(url, filename)
@@ -1548,7 +1613,7 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
 
             if sent:
                 sent_count += 1
-                sent_filenames.add(filename)
+                sent_identity_keys.update(identity_keys)
             else:
                 failed_count += 1
         finally:
@@ -1575,17 +1640,18 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
 def clone_attachments_dest_to_source(
     dest_task: dict, source_task_id: str
 ) -> dict[str, int | bool]:
-    """Clona anexos do destino para source via custom fields mapeados (com fallback)."""
+    """Clona anexos preservando campo->campo e task-only->task sem duplicar."""
     dest_custom_fields = {
         str(cf.get("id")): cf for cf in (dest_task.get("custom_fields", []) or [])
     }
-    dest_task_name = dest_task.get("name", "Sem nome")
+    dest_to_source_field_map = _get_dest_to_source_field_map()
 
     sent_count = 0
     attempted_count = 0
     failed_count = 0
     skipped_no_url_count = 0
-    sent_filenames: set[str] = set()
+    field_identity_keys: set[str] = set()
+    sent_identity_keys: set[str] = set()
     dest_attachment_fields = [
         (dest_cf_id, cf)
         for dest_cf_id, cf in dest_custom_fields.items()
@@ -1611,24 +1677,50 @@ def clone_attachments_dest_to_source(
             continue
 
         for item in items:
+            identity_keys = _build_attachment_identity_keys(item)
+            field_identity_keys.update(identity_keys)
             url = _select_attachment_url(item)
             if not url:
                 skipped_no_url_count += 1
                 continue
             attempted_count += 1
-            filename = _build_custom_field_attachment_filename(cf, dest_task_name, item)
+            source_cf_id = (
+                dest_cf_id
+                if ENV_SYNC_USE_DIRECT_FIELDS
+                else dest_to_source_field_map.get(dest_cf_id)
+            )
+            filename = _guess_attachment_filename(item)
             temp_path, content_type = _download_attachment_to_temp_from_dest(url, filename)
             try:
                 sent = False
-                ok = _upload_task_attachment_to_source(
-                    source_task_id, temp_path, filename, content_type
-                )
-                if ok:
-                    sent = True
+                if source_cf_id:
+                    uploaded_id = _upload_custom_field_attachment_to_source(
+                        source_cf_id, temp_path, filename, content_type
+                    )
+                    if uploaded_id:
+                        try:
+                            _set_custom_field_value_in_source(
+                                source_task_id,
+                                source_cf_id,
+                                {"add": [uploaded_id]},
+                            )
+                            sent = True
+                        except Exception as e:
+                            logger.warning(
+                                "Falha ao associar anexo ao campo source %s: %s",
+                                source_cf_id,
+                                e,
+                            )
+                else:
+                    logger.warning(
+                        "Campo de anexo sem mapeamento de origem. dest_field_id=%s filename=%s",
+                        dest_cf_id,
+                        filename,
+                    )
 
                 if sent:
                     sent_count += 1
-                    sent_filenames.add(filename)
+                    sent_identity_keys.update(identity_keys)
                 else:
                     failed_count += 1
                     logger.warning(
@@ -1646,14 +1738,17 @@ def clone_attachments_dest_to_source(
     # preserva anexos como anexos da task source (sem inferir campo por nome).
     task_level_attachments = dest_task.get("attachments", []) or []
     for att in task_level_attachments:
+        identity_keys = _build_attachment_identity_keys(att)
+        if identity_keys and identity_keys.intersection(field_identity_keys):
+            continue
+        if identity_keys and identity_keys.intersection(sent_identity_keys):
+            continue
         url = _select_attachment_url(att)
         if not url:
             skipped_no_url_count += 1
             continue
 
         filename = _guess_attachment_filename(att)
-        if filename in sent_filenames:
-            continue
         attempted_count += 1
 
         temp_path, content_type = _download_attachment_to_temp_from_dest(url, filename)
@@ -1667,7 +1762,7 @@ def clone_attachments_dest_to_source(
 
             if sent:
                 sent_count += 1
-                sent_filenames.add(filename)
+                sent_identity_keys.update(identity_keys)
             else:
                 failed_count += 1
         finally:

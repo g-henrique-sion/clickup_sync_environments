@@ -13,7 +13,13 @@ from app.automations import (
     relationship_bilateral,
     relationship_unilateral_black,
 )
-from app.automations.common import TaskNotFoundError, build_status_change_context
+from app.automations.common import (
+    StatusConvergencePendingError,
+    TaskNotFoundError,
+    TaskNotReadyError,
+    build_status_change_context,
+    normalize_status,
+)
 from app.config.settings import (
     AUDITORIA_ROUTING_SOURCE_LIST_IDS,
     ONBOARDING_BLACK_SYNC_LIST_ID,
@@ -39,13 +45,13 @@ def process_clickup_event(
         try:
             onboarding_notify.run_task_created(task_id)
             created = adesao_reprovada_demissoes.run(task_id)
-        except TaskNotFoundError:
-            logger.info(
-                "process_clickup_event.skip task_nao_encontrada task_id=%s event=%s",
+        except TaskNotFoundError as exc:
+            logger.warning(
+                "process_clickup_event.defer task_nao_consistente task_id=%s event=%s",
                 task_id,
                 event,
             )
-            return None
+            raise TaskNotReadyError(task_id, max_attempts=8) from exc
         return created
 
     if event != "taskStatusUpdated":
@@ -83,13 +89,13 @@ def process_status_change(
     logger.debug("process_status_change.inicio task_id=%s status='%s'", task_id, new_status)
     try:
         context = build_status_change_context(task_id, new_status)
-    except TaskNotFoundError:
-        logger.info(
-            "process_status_change.skip task_nao_encontrada task_id=%s status_evento='%s'",
+    except TaskNotFoundError as exc:
+        logger.warning(
+            "process_status_change.defer task_nao_consistente task_id=%s status_evento='%s'",
             task_id,
             new_status,
         )
-        return None
+        raise TaskNotReadyError(task_id, max_attempts=6) from exc
 
     logger.debug(
         "process_status_change.context task_id=%s task='%s' list_id=%s list_name='%s' status_atual='%s' status_evento='%s' status_evento_normalizado='%s'",
@@ -106,6 +112,26 @@ def process_status_change(
         context.current_status_normalized
         and context.current_status_normalized != context.normalized_new_status
     ):
+        old_status_normalized = normalize_status(old_status)
+        if (
+            old_status_normalized
+            and context.current_status_normalized == old_status_normalized
+        ):
+            logger.warning(
+                "process_status_change.defer status_ainda_nao_convergiu task_id=%s old_status='%s' status_evento='%s' status_atual='%s'",
+                context.task_id,
+                old_status or "",
+                context.normalized_new_status,
+                context.current_status_normalized,
+            )
+            raise StatusConvergencePendingError(
+                context.task_id,
+                current_status=context.current_status_raw,
+                old_status=old_status or "",
+                new_status=context.new_status,
+                max_attempts=5,
+            )
+
         logger.debug(
             "process_status_change.skip stale_event task_id=%s status_evento='%s' status_atual='%s'",
             context.task_id,
