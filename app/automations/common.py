@@ -35,6 +35,51 @@ class TaskNotFoundError(Exception):
         self.status_code = 404
 
 
+class RetryableWebhookError(Exception):
+    """Erro transitório que deve voltar para a fila com retry limitado."""
+
+    def __init__(self, message: str, *, max_attempts: int = 6) -> None:
+        super().__init__(message)
+        self.max_attempts = max(1, int(max_attempts))
+
+
+class TaskNotReadyError(RetryableWebhookError):
+    """Task ainda nao visivel/consistente na API para o evento recebido."""
+
+    def __init__(self, task_id: str, *, max_attempts: int = 6) -> None:
+        super().__init__(
+            f"Task ainda nao consistente na API: {task_id}",
+            max_attempts=max_attempts,
+        )
+        self.task_id = str(task_id)
+
+
+class StatusConvergencePendingError(RetryableWebhookError):
+    """Webhook chegou antes de a leitura da task refletir o novo status."""
+
+    def __init__(
+        self,
+        task_id: str,
+        *,
+        current_status: str,
+        old_status: str,
+        new_status: str,
+        max_attempts: int = 5,
+    ) -> None:
+        super().__init__(
+            (
+                "Status ainda nao convergiu na API: "
+                f"task_id={task_id} current='{current_status}' "
+                f"old='{old_status}' new='{new_status}'"
+            ),
+            max_attempts=max_attempts,
+        )
+        self.task_id = str(task_id)
+        self.current_status = str(current_status or "")
+        self.old_status = str(old_status or "")
+        self.new_status = str(new_status or "")
+
+
 def normalize_status(value: str | None) -> str:
     if not value:
         return ""

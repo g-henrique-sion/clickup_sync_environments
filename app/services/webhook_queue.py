@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 
 import requests
 
+from app.automations.common import RetryableWebhookError
 from app.config.settings import DATA_DIR, WEBHOOK_QUEUE_MAXSIZE, WEBHOOK_WORKERS
 from app.services.clone_service import process_clickup_event
 
@@ -205,6 +206,9 @@ def _is_non_retryable_error(
     event_type: str,
     attempts: int,
 ) -> bool:
+    if isinstance(error, RetryableWebhookError):
+        return attempts >= error.max_attempts
+
     status = _extract_http_status_code(error)
     if status in {400, 401, 403, 404, 422}:
         return True
