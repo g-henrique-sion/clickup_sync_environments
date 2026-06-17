@@ -12,6 +12,7 @@ from app.automations import (
     onboarding_notify,
     relationship_bilateral,
     relationship_unilateral_black,
+    task_name_on_create,
 )
 from app.automations.common import (
     StatusConvergencePendingError,
@@ -44,6 +45,7 @@ def process_clickup_event(
         logger.debug("process_clickup_event.task_created task_id=%s", task_id)
         try:
             onboarding_notify.run_task_created(task_id)
+            name_update = task_name_on_create.run_task_created(task_id)
             created = adesao_reprovada_demissoes.run(task_id)
         except TaskNotFoundError as exc:
             logger.warning(
@@ -52,7 +54,7 @@ def process_clickup_event(
                 event,
             )
             raise TaskNotReadyError(task_id, max_attempts=8) from exc
-        return created
+        return created or name_update
 
     if event != "taskStatusUpdated":
         logger.debug(

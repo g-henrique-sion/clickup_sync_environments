@@ -1160,6 +1160,24 @@ def set_task_custom_item_any(task_id: str, custom_item_id: int) -> dict:
     return data
 
 
+def update_task_name_any(task_id: str, name: str) -> dict:
+    """Atualiza nome da task tentando token destino e fallback para source."""
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        raise ValueError("Nome da task nao pode ser vazio.")
+    payload = {"name": clean_name}
+    try:
+        data = _update_task_with_session(_get_dest_session(), task_id, payload)
+    except Exception:
+        data = _update_task_with_session(_get_source_session(), task_id, payload)
+    logger.info(
+        "Nome da task atualizado: task_id=%s name='%s'",
+        task_id,
+        clean_name,
+    )
+    return data
+
+
 def add_task_link_any(task_id: str, links_to: str) -> dict | None:
     """Cria relacionamento (Task Link) entre duas tasks."""
     path = f"{BASE_URL}/task/{task_id}/link/{links_to}"
