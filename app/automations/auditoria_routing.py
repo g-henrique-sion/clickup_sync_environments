@@ -207,7 +207,11 @@ def run(context: StatusChangeContext) -> dict | None:
 
     original_name = context.task_name
     name = (
-        build_formatted_task_name(context.task_data, original_name)
+        build_formatted_task_name(
+            context.task_data,
+            original_name,
+            target_list_id,
+        )
         if should_format_task_name(target_list_id)
         else original_name
     )

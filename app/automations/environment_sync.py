@@ -122,7 +122,7 @@ def _clone_to_dest_from_source(
 
     original_name = task_data.get("name", "Sem nome")
     name = (
-        build_formatted_task_name(task_data, original_name)
+        build_formatted_task_name(task_data, original_name, DEST_LIST_ID)
         if should_format_task_name(DEST_LIST_ID)
         else original_name
     )
@@ -231,7 +231,11 @@ def run(context: StatusChangeContext) -> dict | None:
     ):
         original_return_name = task_data.get("name", "Sem nome")
         return_name = (
-            build_formatted_task_name(task_data, original_return_name)
+            build_formatted_task_name(
+                task_data,
+                original_return_name,
+                SOURCE_RETURN_LIST_ID,
+            )
             if should_format_task_name(SOURCE_RETURN_LIST_ID)
             else original_return_name
         )
