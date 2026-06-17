@@ -488,6 +488,47 @@ def _build_attachment_identity_keys(att: dict) -> set[str]:
     return keys
 
 
+def _build_attachment_lookup(attachments: list[dict] | None) -> dict[str, dict]:
+    lookup: dict[str, dict] = {}
+    for att in attachments or []:
+        if not isinstance(att, dict):
+            continue
+        for key in _build_attachment_identity_keys(att):
+            lookup.setdefault(key, att)
+    return lookup
+
+
+def _resolve_attachment_download_source(item: dict, task_attachment_lookup: dict[str, dict]) -> dict:
+    for key in _build_attachment_identity_keys(item):
+        matched = task_attachment_lookup.get(key)
+        if matched:
+            return matched
+    return item
+
+
+def _is_probably_html_payload(head: bytes) -> bool:
+    prefix = (head or b"")[:256].lstrip().lower()
+    if not prefix:
+        return False
+    return prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html")
+
+
+def _validate_downloaded_attachment_bytes(filename: str, content_type: str, head: bytes) -> None:
+    ext = os.path.splitext(str(filename or ""))[1].strip().lower()
+    normalized_content_type = str(content_type or "").strip().lower()
+
+    expects_pdf = ext == ".pdf" or "application/pdf" in normalized_content_type
+    if expects_pdf and not (head or b"").startswith(b"%PDF-"):
+        raise ValueError(
+            f"downloaded_attachment_not_pdf filename={filename} content_type={content_type!r}"
+        )
+
+    if _is_probably_html_payload(head):
+        raise ValueError(
+            f"downloaded_attachment_is_html filename={filename} content_type={content_type!r}"
+        )
+
+
 def _build_custom_field_attachment_filename(cf: dict, task_name: str, item: dict) -> str:
     """Gera nome do arquivo como: nome do campo - nome da task."""
     field_name = str(cf.get("name") or cf.get("id") or "campo").strip()
@@ -769,10 +810,21 @@ def _download_attachment_to_temp(url: str, filename: str) -> tuple[str, str]:
 
     _, ext = os.path.splitext(filename)
     fd, path = tempfile.mkstemp(prefix="clickup_attach_", suffix=ext)
-    with os.fdopen(fd, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
+    first_chunk = b""
+    try:
+        with os.fdopen(fd, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    if not first_chunk:
+                        first_chunk = chunk[:4096]
+                    f.write(chunk)
+        _validate_downloaded_attachment_bytes(filename, content_type, first_chunk)
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            logger.debug("Falha ao remover arquivo temporario invalido: %s", path)
+        raise
     return path, content_type
 
 
@@ -783,10 +835,21 @@ def _download_attachment_to_temp_from_dest(url: str, filename: str) -> tuple[str
 
     _, ext = os.path.splitext(filename)
     fd, path = tempfile.mkstemp(prefix="clickup_attach_", suffix=ext)
-    with os.fdopen(fd, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
+    first_chunk = b""
+    try:
+        with os.fdopen(fd, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    if not first_chunk:
+                        first_chunk = chunk[:4096]
+                    f.write(chunk)
+        _validate_downloaded_attachment_bytes(filename, content_type, first_chunk)
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            logger.debug("Falha ao remover arquivo temporario invalido: %s", path)
+        raise
     return path, content_type
 
 
@@ -1499,6 +1562,7 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
         str(cf.get("id")): cf for cf in (source_task.get("custom_fields", []) or [])
     }
     source_to_dest_field_map = _get_source_to_dest_field_map()
+    source_task_attachment_lookup = _build_attachment_lookup(source_task.get("attachments", []) or [])
 
     sent_count = 0
     attempted_count = 0
@@ -1538,14 +1602,27 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
         for item in items:
             identity_keys = _build_attachment_identity_keys(item)
             field_identity_keys.update(identity_keys)
-            url = _select_attachment_url(item)
+            download_source = _resolve_attachment_download_source(
+                item,
+                source_task_attachment_lookup,
+            )
+            url = _select_attachment_url(download_source)
             if not url:
                 logger.warning("Campo %s possui item sem URL de download. Ignorando.", src_cf_id)
                 skipped_no_url_count += 1
                 continue
             attempted_count += 1
             filename = _guess_attachment_filename(item)
-            temp_path, content_type = _download_attachment_to_temp(url, filename)
+            try:
+                temp_path, content_type = _download_attachment_to_temp(url, filename)
+            except Exception as e:
+                failed_count += 1
+                logger.warning(
+                    "Falha ao baixar anexo do campo %s com fonte resolvida: %s",
+                    src_cf_id,
+                    e,
+                )
+                continue
             try:
                 sent = False
                 if dest_cf_id:
@@ -1645,6 +1722,7 @@ def clone_attachments_dest_to_source(
         str(cf.get("id")): cf for cf in (dest_task.get("custom_fields", []) or [])
     }
     dest_to_source_field_map = _get_dest_to_source_field_map()
+    dest_task_attachment_lookup = _build_attachment_lookup(dest_task.get("attachments", []) or [])
 
     sent_count = 0
     attempted_count = 0
@@ -1679,7 +1757,11 @@ def clone_attachments_dest_to_source(
         for item in items:
             identity_keys = _build_attachment_identity_keys(item)
             field_identity_keys.update(identity_keys)
-            url = _select_attachment_url(item)
+            download_source = _resolve_attachment_download_source(
+                item,
+                dest_task_attachment_lookup,
+            )
+            url = _select_attachment_url(download_source)
             if not url:
                 skipped_no_url_count += 1
                 continue
@@ -1690,7 +1772,16 @@ def clone_attachments_dest_to_source(
                 else dest_to_source_field_map.get(dest_cf_id)
             )
             filename = _guess_attachment_filename(item)
-            temp_path, content_type = _download_attachment_to_temp_from_dest(url, filename)
+            try:
+                temp_path, content_type = _download_attachment_to_temp_from_dest(url, filename)
+            except Exception as e:
+                failed_count += 1
+                logger.warning(
+                    "Falha ao baixar anexo de retorno do campo %s com fonte resolvida: %s",
+                    dest_cf_id,
+                    e,
+                )
+                continue
             try:
                 sent = False
                 if source_cf_id:

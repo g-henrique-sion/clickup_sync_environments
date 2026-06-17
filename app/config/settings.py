@@ -3,7 +3,7 @@
 import json
 import logging
 import os
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from dotenv import load_dotenv
 
@@ -27,6 +27,20 @@ def _parse_json_mapping(raw_value: str, var_name: str) -> dict[str, str]:
         if not isinstance(parsed, dict):
             raise ValueError(f"{var_name} deve ser um objeto JSON.")
         return {str(k).strip(): str(v).strip() for k, v in parsed.items()}
+    except (json.JSONDecodeError, ValueError):
+        logging.getLogger(__name__).warning(
+            "%s invalido (JSON). Valor bruto ignorado.", var_name
+        )
+        return {}
+
+
+def _parse_json_object(raw_value: str, var_name: str) -> dict[str, Any]:
+    """Parseia um objeto JSON mantendo a estrutura interna."""
+    try:
+        parsed = json.loads(raw_value)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{var_name} deve ser um objeto JSON.")
+        return parsed
     except (json.JSONDecodeError, ValueError):
         logging.getLogger(__name__).warning(
             "%s invalido (JSON). Valor bruto ignorado.", var_name
@@ -149,11 +163,11 @@ ONBOARDING_NOTIFY_LIST_IDS: list[str] = _parse_csv_values(
 )
 ONBOARDING_NOTIFY_USER_ID: str = os.getenv(
     "ONBOARDING_NOTIFY_USER_ID",
-    "111955186",
+    "112035201",
 ).strip()
 ONBOARDING_NOTIFY_USER_NAME: str = os.getenv(
     "ONBOARDING_NOTIFY_USER_NAME",
-    "Markson Fernandes",
+    "Christian Lopes de Moura",
 ).strip()
 ONBOARDING_NOTIFY_USER_IDS: list[str] = _parse_csv_values(
     os.getenv("ONBOARDING_NOTIFY_USER_IDS", ONBOARDING_NOTIFY_USER_ID)
@@ -277,6 +291,32 @@ TASK_NAME_TEMPLATE: str = os.getenv(
     "TASK_NAME_TEMPLATE",
     "{razao} - UC {uc}",
 ).strip()
+_TASK_NAME_FORMAT_RULES_DEFAULT = {
+    "901326902129": {
+        "field_a_id": "6b668919-9c13-4127-bc2e-fa14eee95e8a",
+        "field_b_id": "2ef3a097-4122-4c3d-9626-000087de9ced",
+        "template": "{field_a} - {field_b}",
+    }
+}
+_task_name_format_rules_env = os.getenv("TASK_NAME_FORMAT_RULES")
+_task_name_format_rules_raw = _parse_json_object(
+    _task_name_format_rules_env
+    if _task_name_format_rules_env is not None
+    else json.dumps(_TASK_NAME_FORMAT_RULES_DEFAULT, ensure_ascii=False),
+    "TASK_NAME_FORMAT_RULES",
+)
+TASK_NAME_FORMAT_RULES: dict[str, dict[str, str]] = {}
+for raw_list_id, raw_rule in _task_name_format_rules_raw.items():
+    list_id = str(raw_list_id or "").strip()
+    if not list_id or not isinstance(raw_rule, dict):
+        continue
+    normalized_rule = {
+        str(key).strip(): str(value).strip()
+        for key, value in raw_rule.items()
+        if str(key).strip() and value is not None and str(value).strip()
+    }
+    if normalized_rule:
+        TASK_NAME_FORMAT_RULES[list_id] = normalized_rule
 
 # Servidor
 PORT: int = int(os.getenv("PORT", "8000"))
