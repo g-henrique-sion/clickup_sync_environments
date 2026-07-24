@@ -15,6 +15,7 @@ from app.config.settings import (
     CLONE_FIELD_MAP,
     DEST_LIST_ID,
     DEST_RETURN_TRIGGER_STATUS,
+    SOURCE_LIST_ID,
     SOURCE_LIST_MAP,
     SOURCE_RETURN_LIST_ID,
     SOURCE_RETURN_TRIGGER_STATUS,
@@ -29,6 +30,7 @@ from app.core.clickup_client import (
     create_task_in_dest,
     create_task_in_source_list,
     delete_task_in_dest,
+    get_list_fields_any,
     task_permalink,
 )
 
@@ -38,6 +40,7 @@ _ATTACHMENT_TYPES = {"attachment", "file", "files", "file_attachment", "file_upl
 _BLOCKED_TYPES = {"formula", "rollup", "progress", "automatic_progress", "button"}
 _inflight_return_hydration: set[str] = set()
 _inflight_return_hydration_lock = threading.Lock()
+_target_list_field_ids_cache: dict[str, set[str]] = {}
 _COPY_RETRIES = 3
 _COPY_RETRY_SLEEP_SECONDS = 1.0
 
@@ -55,6 +58,21 @@ def _mark_return_hydration_done(task_id: str) -> None:
 def _is_return_hydration_inflight(task_id: str) -> bool:
     with _inflight_return_hydration_lock:
         return str(task_id) in _inflight_return_hydration
+
+
+def _get_target_list_field_ids(list_id: str) -> set[str]:
+    cached = _target_list_field_ids_cache.get(str(list_id))
+    if cached is not None:
+        return cached
+
+    fields = get_list_fields_any(list_id)
+    resolved = {
+        str(field.get("id") or "").strip()
+        for field in fields
+        if str(field.get("id") or "").strip()
+    }
+    _target_list_field_ids_cache[str(list_id)] = resolved
+    return resolved
 
 
 def _normalize_field_type(value: str | None) -> str:
@@ -127,7 +145,27 @@ def _clone_to_dest_from_source(
         else original_name
     )
     description = task_data.get("description", "")
-    custom_fields = build_custom_fields_payload(task_data)
+    restrict_to_dest_schema = (
+        not is_source_return_to_dest and source_list_id == SOURCE_LIST_ID
+    )
+    allowed_dest_field_ids: set[str] | None = None
+    if restrict_to_dest_schema:
+        resolved_ids = _get_target_list_field_ids(DEST_LIST_ID)
+        if resolved_ids:
+            allowed_dest_field_ids = resolved_ids
+        else:
+            logger.warning(
+                "env_sync.schema_destino.indisponivel origem_task_id=%s origem_lista=%s destino_lista=%s. "
+                "Seguindo sem filtro para nao bloquear o fluxo.",
+                task_id,
+                source_list_id,
+                DEST_LIST_ID,
+            )
+
+    custom_fields = build_custom_fields_payload(
+        task_data,
+        allowed_field_ids=allowed_dest_field_ids,
+    )
     expected_custom_fields = _expected_custom_fields_count(task_data)
 
     logger.info(
@@ -143,6 +181,15 @@ def _clone_to_dest_from_source(
         expected_custom_fields,
         "ok" if len(custom_fields) == expected_custom_fields else "parcial",
     )
+    if allowed_dest_field_ids is not None:
+        logger.info(
+            "env_sync.schema_destino.aplicado origem_task_id=%s origem_lista=%s destino_lista=%s campos_permitidos=%d descartados=%d",
+            task_id,
+            source_list_id,
+            DEST_LIST_ID,
+            len(allowed_dest_field_ids),
+            max(0, expected_custom_fields - len(custom_fields)),
+        )
     logger.info(
         "Clonando task '%s' (%s) da lista %s com %d custom fields (map=%d)...",
         name,
@@ -169,7 +216,11 @@ def _clone_to_dest_from_source(
     try:
         attachment_result = _run_copy_with_retry(
             "env_sync.clone_attachments",
-            lambda: clone_attachments(task_data, created_id),
+            lambda: clone_attachments(
+                task_data,
+                created_id,
+                allowed_dest_field_ids=allowed_dest_field_ids,
+            ),
         )
         logger.info(
             "env_sync.anexos origem_task_id=%s destino_task_id=%s enviados=%d tentados=%d falhas=%d status=%s",

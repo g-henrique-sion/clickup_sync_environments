@@ -27,6 +27,7 @@ from app.core.clickup_client import (
     clone_attachments_dest_to_source,
     clone_comments_dest_to_source,
     create_task_in_any_list,
+    get_list_fields_any,
     move_task_to_list_any,
     resolve_list_status_name_any,
     set_task_custom_item_any,
@@ -41,6 +42,7 @@ _BLOCKED_TYPES = {"formula", "rollup", "progress", "automatic_progress", "button
 _MILESTONE_CUSTOM_ITEM_ID = 1
 _COPY_RETRIES = 3
 _COPY_RETRY_SLEEP_SECONDS = 1.0
+_target_list_field_ids_cache: dict[str, set[str]] = {}
 
 
 def _normalize_field_type(value: str | None) -> str:
@@ -75,11 +77,32 @@ def _expected_custom_fields_count(task_data: dict) -> int:
     return total
 
 
-def _build_direct_custom_fields_payload(task_data: dict) -> list[dict]:
+def _get_target_list_field_ids(list_id: str) -> set[str]:
+    cached = _target_list_field_ids_cache.get(str(list_id))
+    if cached is not None:
+        return cached
+
+    fields = get_list_fields_any(list_id)
+    resolved = {
+        str(field.get("id") or "").strip()
+        for field in fields
+        if str(field.get("id") or "").strip()
+    }
+    _target_list_field_ids_cache[str(list_id)] = resolved
+    return resolved
+
+
+def _build_direct_custom_fields_payload(
+    task_data: dict,
+    *,
+    allowed_field_ids: set[str] | None = None,
+) -> list[dict]:
     fields: list[dict] = []
     for cf in task_data.get("custom_fields", []) or []:
         field_id = str(cf.get("id") or "").strip()
         if not field_id:
+            continue
+        if allowed_field_ids is not None and field_id not in allowed_field_ids:
             continue
         field_type = _normalize_field_type(cf.get("type"))
         if field_type in _ATTACHMENT_TYPES or field_type in _BLOCKED_TYPES:
@@ -216,8 +239,22 @@ def run(context: StatusChangeContext) -> dict | None:
         else original_name
     )
     description = context.task_data.get("description", "")
-    custom_fields = _build_direct_custom_fields_payload(context.task_data)
+    target_field_ids = _get_target_list_field_ids(target_list_id)
+    allowed_target_field_ids: set[str] | None = target_field_ids or None
+    custom_fields = _build_direct_custom_fields_payload(
+        context.task_data,
+        allowed_field_ids=allowed_target_field_ids,
+    )
     expected_custom_fields = _expected_custom_fields_count(context.task_data)
+    movable_field_ids = [
+        str(cf.get("id") or "").strip()
+        for cf in (context.task_data.get("custom_fields", []) or [])
+        if str(cf.get("id") or "").strip()
+        and (
+            allowed_target_field_ids is None
+            or str(cf.get("id") or "").strip() in allowed_target_field_ids
+        )
+    ]
 
     logger.info(
         "auditoria_routing.inicio task_id=%s task='%s' rota=%s status='%s' plano='%s' origem_lista=%s destino_lista=%s",
@@ -236,12 +273,21 @@ def run(context: StatusChangeContext) -> dict | None:
         expected_custom_fields,
         "ok" if len(custom_fields) == expected_custom_fields else "parcial",
     )
+    if allowed_target_field_ids is not None:
+        logger.info(
+            "auditoria_routing.schema_destino.aplicado task_id=%s destino_lista=%s campos_permitidos=%d descartados=%d",
+            context.task_id,
+            target_list_id,
+            len(allowed_target_field_ids),
+            max(0, expected_custom_fields - len(custom_fields)),
+        )
 
     if route_key == "rateio":
         moved = move_task_to_list_any(
             task_id=context.task_id,
             target_list_id=target_list_id,
             source_status_name=context.current_status_raw or context.new_status,
+            custom_fields_to_move=movable_field_ids,
         )
         logger.info(
             "auditoria_routing.rateio.movida task_id=%s origem_lista=%s destino_lista=%s link=%s",
@@ -308,7 +354,11 @@ def run(context: StatusChangeContext) -> dict | None:
     try:
         attachment_result = _run_copy_with_retry(
             "auditoria_routing.clone_attachments",
-            lambda: clone_attachments_dest_to_source(context.task_data, created_id),
+            lambda: clone_attachments_dest_to_source(
+                context.task_data,
+                created_id,
+                allowed_source_field_ids=allowed_target_field_ids,
+            ),
         )
         logger.info(
             "auditoria_routing.anexos auditoria_task_id=%s destino_task_id=%s enviados=%d tentados=%d falhas=%d status=%s",
