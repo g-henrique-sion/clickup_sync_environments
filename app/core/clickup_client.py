@@ -1301,6 +1301,7 @@ def _move_task_home_list_with_session(
     task_id: str,
     target_list_id: str,
     source_status_name: str | None,
+    custom_fields_to_move: list[str] | None = None,
 ) -> dict:
     target_list_data = _fetch_list_with_session(session, target_list_id)
     target_statuses = target_list_data.get("statuses") or []
@@ -1316,7 +1317,16 @@ def _move_task_home_list_with_session(
             if destination_status_id:
                 break
 
+    resolved_custom_fields_to_move = [
+        str(field_id or "").strip()
+        for field_id in (custom_fields_to_move or [])
+        if str(field_id or "").strip()
+    ]
     payload: dict = {"move_custom_fields": True}
+    if custom_fields_to_move is not None:
+        payload["move_custom_fields"] = bool(resolved_custom_fields_to_move)
+        if resolved_custom_fields_to_move:
+            payload["custom_fields_to_move"] = resolved_custom_fields_to_move
     if source_status_name and destination_status_name:
         payload["status_mappings"] = [
             {
@@ -1355,7 +1365,7 @@ def _move_task_home_list_with_session(
                 source_status_id = _source_status_id()
                 if source_status_id and destination_status_id:
                     payload_ids = {
-                        "move_custom_fields": True,
+                        "move_custom_fields": payload.get("move_custom_fields", True),
                         "status_mappings": [
                             {
                                 "source_status": source_status_id,
@@ -1363,6 +1373,8 @@ def _move_task_home_list_with_session(
                             }
                         ],
                     }
+                    if payload.get("custom_fields_to_move"):
+                        payload_ids["custom_fields_to_move"] = payload["custom_fields_to_move"]
                     try:
                         move_resp = _request_with_retry(
                             session,
@@ -1390,7 +1402,14 @@ def _move_task_home_list_with_session(
                         session,
                         "PUT",
                         move_url,
-                        json={"move_custom_fields": True},
+                        json={
+                            "move_custom_fields": payload.get("move_custom_fields", True),
+                            **(
+                                {"custom_fields_to_move": payload["custom_fields_to_move"]}
+                                if payload.get("custom_fields_to_move")
+                                else {}
+                            ),
+                        },
                     )
                     logger.warning(
                         "Move home_list: fallback sem status_mappings task_id=%s target_list_id=%s",
@@ -1448,6 +1467,7 @@ def move_task_to_list_any(
     task_id: str,
     target_list_id: str,
     source_status_name: str | None = None,
+    custom_fields_to_move: list[str] | None = None,
 ) -> dict:
     """Move uma task para nova home list mantendo o mesmo ID da task."""
     try:
@@ -1457,6 +1477,7 @@ def move_task_to_list_any(
             task_id=task_id,
             target_list_id=target_list_id,
             source_status_name=source_status_name,
+            custom_fields_to_move=custom_fields_to_move,
         )
     except Exception:
         return _move_task_home_list_with_session(
@@ -1465,6 +1486,7 @@ def move_task_to_list_any(
             task_id=task_id,
             target_list_id=target_list_id,
             source_status_name=source_status_name,
+            custom_fields_to_move=custom_fields_to_move,
         )
 
 
@@ -1482,13 +1504,19 @@ def delete_task_in_source(task_id: str) -> None:
     logger.info("Task removida no source: id=%s", task_id)
 
 
-def build_custom_fields_payload(source_task: dict) -> list[dict]:
+def build_custom_fields_payload(
+    source_task: dict,
+    *,
+    allowed_field_ids: set[str] | None = None,
+) -> list[dict]:
     """Monta payload de custom fields para clone origem -> destino."""
     if ENV_SYNC_USE_DIRECT_FIELDS:
         fields = []
         for cf in source_task.get("custom_fields", []) or []:
             field_id = str(cf.get("id") or "").strip()
             if not field_id:
+                continue
+            if allowed_field_ids is not None and field_id not in allowed_field_ids:
                 continue
             field_type = _normalize_field_type(cf.get("type"))
             if _is_file_custom_field(cf):
@@ -1512,6 +1540,8 @@ def build_custom_fields_payload(source_task: dict) -> list[dict]:
 
     fields = []
     for src_cf_id, dest_cf_id in source_to_dest_field_map.items():
+        if allowed_field_ids is not None and str(dest_cf_id) not in allowed_field_ids:
+            continue
         source_field_type = type_by_id.get(str(src_cf_id))
         if _is_file_custom_field({"type": source_field_type}):
             continue
@@ -1574,7 +1604,12 @@ def build_reverse_custom_fields_payload(dest_task: dict) -> list[dict]:
     return fields
 
 
-def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | bool]:
+def clone_attachments(
+    source_task: dict,
+    dest_task_id: str,
+    *,
+    allowed_dest_field_ids: set[str] | None = None,
+) -> dict[str, int | bool]:
     """Clona anexos preservando campo->campo e task-only->task sem duplicar."""
     source_custom_fields = {
         str(cf.get("id")): cf for cf in (source_task.get("custom_fields", []) or [])
@@ -1619,6 +1654,21 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
 
         for item in items:
             identity_keys = _build_attachment_identity_keys(item)
+            if (
+                allowed_dest_field_ids is not None
+                and dest_cf_id
+                and dest_cf_id not in allowed_dest_field_ids
+            ):
+                logger.warning(
+                    "Campo de anexo fora do schema da lista destino. "
+                    "source_field_id=%s dest_field_id=%s filename=%s. "
+                    "Preservando como anexo da task.",
+                    src_cf_id,
+                    dest_cf_id,
+                    _guess_attachment_filename(item),
+                )
+                continue
+
             field_identity_keys.update(identity_keys)
             download_source = _resolve_attachment_download_source(
                 item,
@@ -1734,6 +1784,9 @@ def clone_attachments(source_task: dict, dest_task_id: str) -> dict[str, int | b
 
 def clone_attachments_dest_to_source(
     dest_task: dict, source_task_id: str
+    ,
+    *,
+    allowed_source_field_ids: set[str] | None = None,
 ) -> dict[str, int | bool]:
     """Clona anexos preservando campo->campo e task-only->task sem duplicar."""
     dest_custom_fields = {
@@ -1774,6 +1827,20 @@ def clone_attachments_dest_to_source(
 
         for item in items:
             identity_keys = _build_attachment_identity_keys(item)
+            if (
+                allowed_source_field_ids is not None
+                and source_cf_id
+                and source_cf_id not in allowed_source_field_ids
+            ):
+                logger.warning(
+                    "Campo de anexo fora do schema da lista destino. "
+                    "dest_field_id=%s source_field_id=%s filename=%s. "
+                    "Preservando como anexo da task.",
+                    dest_cf_id,
+                    source_cf_id,
+                    _guess_attachment_filename(item),
+                )
+                continue
             field_identity_keys.update(identity_keys)
             download_source = _resolve_attachment_download_source(
                 item,
