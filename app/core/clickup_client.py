@@ -803,9 +803,7 @@ def _get_source_attachment_field_name_map() -> dict[str, str]:
     return mapping
 
 
-def _download_attachment_to_temp(url: str, filename: str) -> tuple[str, str]:
-    session = _get_source_session()
-    resp = _request_with_retry(session, "GET", url, stream=True)
+def _download_response_to_temp(resp: requests.Response, filename: str) -> tuple[str, str]:
     content_type = resp.headers.get("Content-Type") or "application/octet-stream"
 
     _, ext = os.path.splitext(filename)
@@ -826,31 +824,42 @@ def _download_attachment_to_temp(url: str, filename: str) -> tuple[str, str]:
             logger.debug("Falha ao remover arquivo temporario invalido: %s", path)
         raise
     return path, content_type
+
+
+def _download_attachment_to_temp_with_fallback(
+    url: str, filename: str, authenticated_session: requests.Session
+) -> tuple[str, str]:
+    errors: list[str] = []
+    plain_session = requests.Session()
+    _configure_session(plain_session)
+    try:
+        for label, session in (
+            ("plain", plain_session),
+            ("authenticated", authenticated_session),
+        ):
+            try:
+                resp = _request_with_retry(session, "GET", url, stream=True)
+                return _download_response_to_temp(resp, filename)
+            except Exception as e:
+                errors.append(f"{label}: {e}")
+                logger.warning(
+                    "Falha ao baixar anexo (%s). filename=%s erro=%s",
+                    label,
+                    filename,
+                    e,
+                )
+    finally:
+        plain_session.close()
+
+    raise ValueError(f"attachment_download_failed filename={filename} errors={errors}")
+
+
+def _download_attachment_to_temp(url: str, filename: str) -> tuple[str, str]:
+    return _download_attachment_to_temp_with_fallback(url, filename, _get_source_session())
 
 
 def _download_attachment_to_temp_from_dest(url: str, filename: str) -> tuple[str, str]:
-    session = _get_dest_session()
-    resp = _request_with_retry(session, "GET", url, stream=True)
-    content_type = resp.headers.get("Content-Type") or "application/octet-stream"
-
-    _, ext = os.path.splitext(filename)
-    fd, path = tempfile.mkstemp(prefix="clickup_attach_", suffix=ext)
-    first_chunk = b""
-    try:
-        with os.fdopen(fd, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    if not first_chunk:
-                        first_chunk = chunk[:4096]
-                    f.write(chunk)
-        _validate_downloaded_attachment_bytes(filename, content_type, first_chunk)
-    except Exception:
-        try:
-            os.unlink(path)
-        except OSError:
-            logger.debug("Falha ao remover arquivo temporario invalido: %s", path)
-        raise
-    return path, content_type
+    return _download_attachment_to_temp_with_fallback(url, filename, _get_dest_session())
 
 
 def _upload_task_attachment(dest_task_id: str, file_path: str, filename: str, content_type: str) -> bool:
@@ -895,24 +904,45 @@ def _upload_custom_field_attachment(
     session = _get_dest_session()
     workspace_id = _get_dest_workspace_id()
     url = f"{BASE_URL_V3}/workspaces/{workspace_id}/custom_fields/{dest_field_id}/attachments"
-    with open(file_path, "rb") as f:
-        for key in ("attachment", "file", "attachment[0]"):
-            f.seek(0)
-            files = {key: (filename, f, content_type)}
+    local_size = os.path.getsize(file_path)
+    for attempt in range(1, 4):
+        with open(file_path, "rb") as f:
+            for key in ("attachment", "file", "attachment[0]"):
+                f.seek(0)
+                files = {key: (filename, f, content_type)}
+                try:
+                    resp = _request_with_retry(session, "POST", url, files=files)
+                    break
+                except requests.HTTPError as e:
+                    resp_err = e.response
+                    detail = resp_err.text if resp_err is not None else str(e)
+                    logger.warning(
+                        "Falha ao enviar anexo de custom field (%s): %s", key, detail
+                    )
+            else:
+                return None
+        data = resp.json()
+        if isinstance(data, dict):
+            attachment_data = data.get("attachment") if isinstance(data.get("attachment"), dict) else {}
+            uploaded_id = data.get("id") or attachment_data.get("id")
+            uploaded_size = data.get("size")
+            if uploaded_size is None:
+                uploaded_size = attachment_data.get("size")
             try:
-                resp = _request_with_retry(session, "POST", url, files=files)
-                break
-            except requests.HTTPError as e:
-                resp_err = e.response
-                detail = resp_err.text if resp_err is not None else str(e)
-                logger.warning(
-                    "Falha ao enviar anexo de custom field (%s): %s", key, detail
-                )
-        else:
-            return None
-    data = resp.json()
-    if isinstance(data, dict):
-        return data.get("id") or (data.get("attachment") or {}).get("id")
+                uploaded_size_int = int(uploaded_size)
+            except (TypeError, ValueError):
+                uploaded_size_int = -1
+            if uploaded_id and not (local_size > 0 and uploaded_size_int == 0):
+                return uploaded_id
+            logger.warning(
+                "Upload de custom field retornou arquivo vazio. field_id=%s filename=%s tentativa=%d/3 local_size=%d response_size=%s",
+                dest_field_id,
+                filename,
+                attempt,
+                local_size,
+                uploaded_size,
+            )
+            time.sleep(1.0 * attempt)
     return None
 
 
@@ -922,26 +952,47 @@ def _upload_custom_field_attachment_to_source(
     session = _get_source_session()
     workspace_id = _get_source_workspace_id()
     url = f"{BASE_URL_V3}/workspaces/{workspace_id}/custom_fields/{source_field_id}/attachments"
-    with open(file_path, "rb") as f:
-        for key in ("attachment", "file", "attachment[0]"):
-            f.seek(0)
-            files = {key: (filename, f, content_type)}
+    local_size = os.path.getsize(file_path)
+    for attempt in range(1, 4):
+        with open(file_path, "rb") as f:
+            for key in ("attachment", "file", "attachment[0]"):
+                f.seek(0)
+                files = {key: (filename, f, content_type)}
+                try:
+                    resp = _request_with_retry(session, "POST", url, files=files)
+                    break
+                except requests.HTTPError as e:
+                    resp_err = e.response
+                    detail = resp_err.text if resp_err is not None else str(e)
+                    logger.warning(
+                        "Falha ao enviar anexo de custom field source (%s): %s",
+                        key,
+                        detail,
+                    )
+            else:
+                return None
+        data = resp.json()
+        if isinstance(data, dict):
+            attachment_data = data.get("attachment") if isinstance(data.get("attachment"), dict) else {}
+            uploaded_id = data.get("id") or attachment_data.get("id")
+            uploaded_size = data.get("size")
+            if uploaded_size is None:
+                uploaded_size = attachment_data.get("size")
             try:
-                resp = _request_with_retry(session, "POST", url, files=files)
-                break
-            except requests.HTTPError as e:
-                resp_err = e.response
-                detail = resp_err.text if resp_err is not None else str(e)
-                logger.warning(
-                    "Falha ao enviar anexo de custom field source (%s): %s",
-                    key,
-                    detail,
-                )
-        else:
-            return None
-    data = resp.json()
-    if isinstance(data, dict):
-        return data.get("id") or (data.get("attachment") or {}).get("id")
+                uploaded_size_int = int(uploaded_size)
+            except (TypeError, ValueError):
+                uploaded_size_int = -1
+            if uploaded_id and not (local_size > 0 and uploaded_size_int == 0):
+                return uploaded_id
+            logger.warning(
+                "Upload de custom field source retornou arquivo vazio. field_id=%s filename=%s tentativa=%d/3 local_size=%d response_size=%s",
+                source_field_id,
+                filename,
+                attempt,
+                local_size,
+                uploaded_size,
+            )
+            time.sleep(1.0 * attempt)
     return None
 
 
@@ -1826,6 +1877,11 @@ def clone_attachments_dest_to_source(
             continue
 
         for item in items:
+            source_cf_id = (
+                dest_cf_id
+                if ENV_SYNC_USE_DIRECT_FIELDS
+                else dest_to_source_field_map.get(dest_cf_id)
+            )
             identity_keys = _build_attachment_identity_keys(item)
             if (
                 allowed_source_field_ids is not None
@@ -1851,11 +1907,6 @@ def clone_attachments_dest_to_source(
                 skipped_no_url_count += 1
                 continue
             attempted_count += 1
-            source_cf_id = (
-                dest_cf_id
-                if ENV_SYNC_USE_DIRECT_FIELDS
-                else dest_to_source_field_map.get(dest_cf_id)
-            )
             filename = _guess_attachment_filename(item)
             try:
                 temp_path, content_type = _download_attachment_to_temp_from_dest(url, filename)
