@@ -9,6 +9,7 @@ from app.automations import (
     ativo_inicio_operacao,
     auditoria_routing,
     environment_sync,
+    inadimplentes_finalizacao,
     onboarding_notify,
     relationship_bilateral,
     relationship_unilateral_black,
@@ -148,6 +149,12 @@ def process_status_change(
         old_status=old_status,
         status_changed_at_ms=status_changed_at_ms,
     )
+    inadimplentes_result = inadimplentes_finalizacao.run(
+        context,
+        old_status=old_status,
+    )
+    if inadimplentes_result is not None:
+        return inadimplentes_result
 
     if context.source_list_id in {
         PLANEJAMENTO_BLACK_SYNC_LIST_ID,
