@@ -272,9 +272,13 @@ def _guard_paid_status(
     if context.normalized_new_status != normalize_status(INADIMPLENTES_PAID_STATUS):
         return None
 
-    if old_status is not None and normalize_status(old_status) == normalize_status(
-        INADIMPLENTES_PAID_STATUS
-    ):
+    if normalize_status(old_status) != normalize_status(INADIMPLENTES_READY_STATUS):
+        logger.debug(
+            "inadimplentes_finalizacao.pago.skip origem_status_nao_validada task_id=%s old_status='%s' new_status='%s'",
+            context.task_id,
+            old_status or "",
+            context.new_status,
+        )
         return None
 
     latest_task = fetch_task_any(context.task_id)
