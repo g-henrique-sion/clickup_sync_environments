@@ -51,8 +51,9 @@ Atualizado em: 2026-07-28
    - Ao tentar mover para `PAGO`, valida:
      - as duas subtarefas existem;
      - as duas subtarefas estao concluidas;
-     - o comprovante esta anexado no campo configurado ou, se nao houver campo configurado, em anexos da task.
+     - o comprovante esta anexado no campo `Comprovante de Baixa` (`3e4964bf-557b-4a47-8f86-b1bc43780910`) ou no campo configurado por variavel.
    - Se faltar algum item, retorna a task para `A BAIXAR NEGATIVACAO` e comenta as pendencias.
+   - Eventos de subtarefas sao ignorados pela trava para permitir a conclusao das subtarefas.
 
 ## Regras de nome de task
 

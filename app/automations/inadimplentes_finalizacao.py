@@ -54,6 +54,10 @@ def _is_enabled() -> bool:
     )
 
 
+def _is_subtask(task_data: dict) -> bool:
+    return bool(str(task_data.get("parent") or "").strip())
+
+
 def _status_name_from_task(task_data: dict) -> str:
     return task_status_value(task_data)
 
@@ -330,6 +334,15 @@ def run(
         return None
 
     if str(context.source_list_id).strip() != _target_list_id():
+        return None
+
+    if _is_subtask(context.task_data):
+        logger.debug(
+            "inadimplentes_finalizacao.skip subtask task_id=%s parent=%s status='%s'",
+            context.task_id,
+            context.task_data.get("parent"),
+            context.new_status,
+        )
         return None
 
     created = _create_missing_subtasks(context, old_status=old_status)

@@ -291,11 +291,11 @@ INADIMPLENTES_REQUIRED_SUBTASK_NAMES: list[str] = _parse_csv_values(
 )
 INADIMPLENTES_COMPROVANTE_FIELD_ID: str = os.getenv(
     "INADIMPLENTES_COMPROVANTE_FIELD_ID",
-    "",
+    "3e4964bf-557b-4a47-8f86-b1bc43780910",
 ).strip()
 INADIMPLENTES_COMPROVANTE_FIELD_NAME: str = os.getenv(
     "INADIMPLENTES_COMPROVANTE_FIELD_NAME",
-    "Comprovante de baixa da negativa\u00e7\u00e3o",
+    "Comprovante de Baixa",
 ).strip()
 INADIMPLENTES_ALLOW_TASK_ATTACHMENT_COMPROVANTE: bool = _parse_bool(
     os.getenv("INADIMPLENTES_ALLOW_TASK_ATTACHMENT_COMPROVANTE"),
