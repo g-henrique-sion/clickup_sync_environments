@@ -48,11 +48,12 @@ Atualizado em: 2026-07-28
    - Ao mudar de `NEGATIVADO` para `A BAIXAR NEGATIVACAO`, cria subtarefas obrigatorias de finalizacao sem duplicar:
      - `Solicitar a baixa da negativacao`
      - `Enviar comprovante de baixa ao cooperado`
-   - Ao tentar mover para `PAGO`, valida:
+   - Ao mover de `A BAIXAR NEGATIVACAO` para `PAGO`, valida:
      - as duas subtarefas existem;
      - as duas subtarefas estao concluidas;
      - o comprovante esta anexado no campo `Comprovante de Baixa` (`3e4964bf-557b-4a47-8f86-b1bc43780910`) ou no campo configurado por variavel.
    - Se faltar algum item, retorna a task para `A BAIXAR NEGATIVACAO` e comenta as pendencias.
+   - Movimentos de qualquer outro status para `PAGO` nao sao bloqueados por essa automacao.
    - Eventos de subtarefas sao ignorados pela trava para permitir a conclusao das subtarefas.
 
 ## Regras de nome de task
