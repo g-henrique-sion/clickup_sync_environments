@@ -1774,12 +1774,11 @@ def clone_attachments(
                     )
                     if uploaded_id:
                         try:
-                            _set_custom_field_value(
+                            sent = set_task_custom_field_any(
                                 dest_task_id,
                                 dest_cf_id,
                                 {"add": [uploaded_id]},
                             )
-                            sent = True
                         except Exception as e:
                             logger.warning(
                                 "Falha ao associar anexo ao campo destino %s: %s",
@@ -1950,12 +1949,11 @@ def clone_attachments_dest_to_source(
                     )
                     if uploaded_id:
                         try:
-                            _set_custom_field_value_in_source(
+                            sent = set_task_custom_field_any(
                                 source_task_id,
                                 source_cf_id,
                                 {"add": [uploaded_id]},
                             )
-                            sent = True
                         except Exception as e:
                             logger.warning(
                                 "Falha ao associar anexo ao campo source %s: %s",
