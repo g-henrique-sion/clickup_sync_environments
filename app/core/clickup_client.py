@@ -1093,6 +1093,7 @@ def _create_task_in_list_with_session(
     custom_item_id: int | None = None,
     status: str | None = None,
     *,
+    parent: str | None = None,
     log_label: str = "lista",
 ) -> dict:
     url = f"{BASE_URL}/list/{list_id}/task"
@@ -1106,6 +1107,8 @@ def _create_task_in_list_with_session(
         payload["custom_item_id"] = int(custom_item_id)
     if status:
         payload["status"] = str(status).strip()
+    if parent:
+        payload["parent"] = str(parent).strip()
 
     resp = _request_with_retry(session, "POST", url, json=payload)
     data = resp.json()
@@ -1170,6 +1173,8 @@ def create_task_in_any_list(
     custom_fields: list[dict] | None = None,
     custom_item_id: int | None = None,
     status: str | None = None,
+    *,
+    parent: str | None = None,
 ) -> dict:
     """Cria task em qualquer lista tentando token destino e fallback para source."""
     try:
@@ -1181,6 +1186,7 @@ def create_task_in_any_list(
             custom_fields=custom_fields,
             custom_item_id=custom_item_id,
             status=status,
+            parent=parent,
             log_label="token_dest",
         )
     except Exception:
@@ -1192,8 +1198,26 @@ def create_task_in_any_list(
             custom_fields=custom_fields,
             custom_item_id=custom_item_id,
             status=status,
+            parent=parent,
             log_label="token_source",
         )
+
+
+def create_subtask_in_any_list(
+    list_id: str,
+    parent_task_id: str,
+    name: str,
+    description: str | None = None,
+    status: str | None = None,
+) -> dict:
+    """Cria subtarefa na mesma lista da task pai usando fallback entre tokens."""
+    return create_task_in_any_list(
+        list_id=list_id,
+        name=name,
+        description=description,
+        status=status,
+        parent=parent_task_id,
+    )
 
 
 def set_task_custom_item_any(task_id: str, custom_item_id: int) -> dict:

@@ -1,6 +1,6 @@
 # Documentacao de Automacoes - clickup_sync_environments
 
-Atualizado em: 2026-06-17
+Atualizado em: 2026-07-28
 
 ## Automacoes ativas
 
@@ -42,6 +42,17 @@ Atualizado em: 2026-06-17
 8. `task_name_on_create` (`app/automations/task_name_on_create.py`)
    - Ao criar task em listas com regra especifica em `TASK_NAME_FORMAT_RULES`, atualiza o nome da propria task.
    - Uso atual: lista `901326902129` (`Candidatos`) com `Nome do Candidato - Cargo/Vaga`.
+
+9. `inadimplentes_finalizacao` (`app/automations/inadimplentes_finalizacao.py`)
+   - Lista: `901326084050` (`Inadimplentes`).
+   - Ao mudar de `NEGATIVADO` para `A BAIXAR NEGATIVACAO`, cria subtarefas obrigatorias de finalizacao sem duplicar:
+     - `Solicitar a baixa da negativacao`
+     - `Enviar comprovante de baixa ao cooperado`
+   - Ao tentar mover para `PAGO`, valida:
+     - as duas subtarefas existem;
+     - as duas subtarefas estao concluidas;
+     - o comprovante esta anexado no campo configurado ou, se nao houver campo configurado, em anexos da task.
+   - Se faltar algum item, retorna a task para `A BAIXAR NEGATIVACAO` e comenta as pendencias.
 
 ## Regras de nome de task
 

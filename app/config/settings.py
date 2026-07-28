@@ -259,6 +259,58 @@ DEMISSOES_CREATE_STATUS: str = os.getenv(
     "to do",
 ).strip()
 
+# Inadimplentes: baixa de negativacao e bloqueio reativo de PAGO
+INADIMPLENTES_FINALIZACAO_ENABLED: bool = _parse_bool(
+    os.getenv("INADIMPLENTES_FINALIZACAO_ENABLED"),
+    default=True,
+)
+INADIMPLENTES_LIST_ID: str = os.getenv(
+    "INADIMPLENTES_LIST_ID",
+    "901326084050",
+).strip()
+INADIMPLENTES_FROM_STATUS: str = os.getenv(
+    "INADIMPLENTES_FROM_STATUS",
+    "NEGATIVADO",
+).strip()
+INADIMPLENTES_READY_STATUS: str = os.getenv(
+    "INADIMPLENTES_READY_STATUS",
+    "A BAIXAR NEGATIVA\u00c7\u00c3O",
+).strip()
+INADIMPLENTES_PAID_STATUS: str = os.getenv(
+    "INADIMPLENTES_PAID_STATUS",
+    "PAGO",
+).strip()
+INADIMPLENTES_REQUIRED_SUBTASK_NAMES: list[str] = _parse_csv_values(
+    os.getenv(
+        "INADIMPLENTES_REQUIRED_SUBTASK_NAMES",
+        (
+            "Solicitar a baixa da negativa\u00e7\u00e3o,"
+            "Enviar comprovante de baixa ao cooperado"
+        ),
+    )
+)
+INADIMPLENTES_COMPROVANTE_FIELD_ID: str = os.getenv(
+    "INADIMPLENTES_COMPROVANTE_FIELD_ID",
+    "",
+).strip()
+INADIMPLENTES_COMPROVANTE_FIELD_NAME: str = os.getenv(
+    "INADIMPLENTES_COMPROVANTE_FIELD_NAME",
+    "Comprovante de baixa da negativa\u00e7\u00e3o",
+).strip()
+INADIMPLENTES_ALLOW_TASK_ATTACHMENT_COMPROVANTE: bool = _parse_bool(
+    os.getenv("INADIMPLENTES_ALLOW_TASK_ATTACHMENT_COMPROVANTE"),
+    default=True,
+)
+INADIMPLENTES_DONE_STATUS_TYPES: list[str] = _parse_csv_values(
+    os.getenv("INADIMPLENTES_DONE_STATUS_TYPES", "done,closed")
+)
+INADIMPLENTES_DONE_STATUS_NAMES: list[str] = _parse_csv_values(
+    os.getenv(
+        "INADIMPLENTES_DONE_STATUS_NAMES",
+        "concluido,concluida,feito,feita,done,complete,completed,closed",
+    )
+)
+
 DEST_SYNC_ALLOWED_STATUSES: list[str] = _parse_csv_values(
     os.getenv(
         "DEST_SYNC_ALLOWED_STATUSES",
