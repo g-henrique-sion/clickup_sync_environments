@@ -175,6 +175,12 @@ ONBOARDING_NOTIFY_USER_IDS: list[str] = _parse_csv_values(
 ONBOARDING_NOTIFY_USER_NAMES: list[str] = _parse_csv_values(
     os.getenv("ONBOARDING_NOTIFY_USER_NAMES", ONBOARDING_NOTIFY_USER_NAME)
 )
+ONBOARDING_NOTIFY_DEDUP_LOOKBACK_SECONDS: int = _parse_number(
+    os.getenv("ONBOARDING_NOTIFY_DEDUP_LOOKBACK_SECONDS"),
+    86400,
+    int,
+    "ONBOARDING_NOTIFY_DEDUP_LOOKBACK_SECONDS",
+)
 
 # Preencher campo "inicio de operacao" ao entrar em Ativo
 _ativo_inicio_operacao_default_lists = ",".join(

@@ -2171,6 +2171,35 @@ def _get_task_comments_from_dest(task_id: str) -> list[dict]:
     return comments
 
 
+def get_task_comments_any(task_id: str) -> list[dict]:
+    """Busca comentarios da task com fallback entre tokens."""
+    last_error: Exception | None = None
+    for getter in (_get_task_comments_from_dest, _get_task_comments):
+        try:
+            return getter(task_id)
+        except requests.HTTPError as exc:
+            last_error = exc
+            status = exc.response.status_code if exc.response is not None else 0
+            if status in {401, 403, 404}:
+                continue
+            logger.warning(
+                "Falha ao buscar comentarios da task %s. Seguindo sem dedup. status=%s",
+                task_id,
+                status,
+            )
+            return []
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    logger.warning(
+        "Falha ao buscar comentarios da task %s com ambos os tokens. Seguindo sem dedup. erro=%s",
+        task_id,
+        last_error,
+    )
+    return []
+
+
 def _get_comment_replies(comment_id: str) -> list[dict]:
     session = _get_source_session()
     resp = _request_with_retry(session, "GET", f"{BASE_URL}/comment/{comment_id}/reply")
