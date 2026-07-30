@@ -31,10 +31,12 @@ Atualizado em: 2026-07-28
 
 5. `ativo_inicio_operacao` (`app/automations/ativo_inicio_operacao.py`)
    - Ao entrar em `Ativo`, preenche `Inicio da Operacao` com o dia 1 do mes da mudanca de status (se vazio).
+   - Se o campo configurado nao existir na task/lista, a automacao registra skip e nao bloqueia a fila.
 
 6. `onboarding_notify` (`app/automations/onboarding_notify.py`)
    - Publica comentarios de criacao e mudanca de status nas listas de onboarding com mencao dos usuarios configurados.
    - Configuracao atual: mencao somente para `Christian Lopes de Moura`.
+   - Antes de comentar, verifica comentarios recentes da task para evitar duplicar a mesma mensagem em retries/reentregas de webhook.
 
 7. `adesao_reprovada_demissoes` (`app/automations/adesao_reprovada_demissoes.py`)
    - Ao criar task em `Adesao Reprovada`, cria marco em `Demissoes` com relacionamento e copia de dados.

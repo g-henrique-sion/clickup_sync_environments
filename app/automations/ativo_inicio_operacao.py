@@ -17,7 +17,7 @@ from app.config.settings import (
     ATIVO_INICIO_OPERACAO_LIST_IDS,
     ATIVO_INICIO_OPERACAO_TRIGGER_STATUS,
 )
-from app.core.clickup_client import set_task_custom_field_any
+from app.core.clickup_client import get_list_fields_any, set_task_custom_field_any
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,26 @@ def _custom_field_value(task_data: dict, field_id: str):
     return None
 
 
+def _custom_field_present_on_task(task_data: dict, field_id: str) -> bool:
+    wanted = str(field_id or "").strip()
+    if not wanted:
+        return False
+    return any(
+        str(custom_field.get("id") or "").strip() == wanted
+        for custom_field in task_data.get("custom_fields", []) or []
+    )
+
+
+def _custom_field_present_on_list(list_id: str, field_id: str) -> bool:
+    wanted = str(field_id or "").strip()
+    if not wanted:
+        return False
+    return any(
+        str(custom_field.get("id") or "").strip() == wanted
+        for custom_field in get_list_fields_any(str(list_id or "").strip())
+    )
+
+
 def run(
     context: StatusChangeContext,
     *,
@@ -88,6 +108,25 @@ def run(
             context.new_status,
         )
         return None
+
+    if not _custom_field_present_on_task(
+        context.task_data,
+        ATIVO_INICIO_OPERACAO_FIELD_ID,
+    ) and not _custom_field_present_on_list(
+        context.source_list_id,
+        ATIVO_INICIO_OPERACAO_FIELD_ID,
+    ):
+        logger.warning(
+            "ativo_inicio_operacao.skip campo_indisponivel task_id=%s list_id=%s field_id=%s",
+            context.task_id,
+            context.source_list_id,
+            ATIVO_INICIO_OPERACAO_FIELD_ID,
+        )
+        return {
+            "skipped": "field_unavailable",
+            "task_id": context.task_id,
+            "field_id": ATIVO_INICIO_OPERACAO_FIELD_ID,
+        }
 
     existing_value = _custom_field_value(context.task_data, ATIVO_INICIO_OPERACAO_FIELD_ID)
     if existing_value not in (None, "", [], {}):

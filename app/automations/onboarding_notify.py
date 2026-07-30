@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from app.automations.common import (
     StatusChangeContext,
@@ -14,11 +15,12 @@ from app.automations.common import (
 )
 from app.config.settings import (
     ONBOARDING_NOTIFY_ENABLED,
+    ONBOARDING_NOTIFY_DEDUP_LOOKBACK_SECONDS,
     ONBOARDING_NOTIFY_LIST_IDS,
     ONBOARDING_NOTIFY_USER_IDS,
     ONBOARDING_NOTIFY_USER_NAMES,
 )
-from app.core.clickup_client import create_task_comment_with_tags_any
+from app.core.clickup_client import create_task_comment_with_tags_any, get_task_comments_any
 
 logger = logging.getLogger(__name__)
 
@@ -66,17 +68,76 @@ def _format_status(value: str | None) -> str:
     return text[:1].upper() + text[1:]
 
 
-def _post_notification(task_id: str, list_name: str, status_name: str) -> dict | None:
-    if not _is_enabled():
-        return None
+def _normalize_comment_text(value: str | None) -> str:
+    return " ".join(str(value or "").split()).strip().lower()
 
-    message = _build_message(list_name, status_name)
-    result = create_task_comment_with_tags_any(
+
+def _comment_text(comment: dict) -> str:
+    chunks = comment.get("comment")
+    if isinstance(chunks, list):
+        return "".join(
+            str(chunk.get("text") or "")
+            for chunk in chunks
+            if isinstance(chunk, dict)
+        )
+    return str(comment.get("comment_text") or comment.get("text") or "")
+
+
+def _comment_date_ms(comment: dict) -> int:
+    for key in ("date", "date_created"):
+        try:
+            return int(comment.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _has_recent_duplicate_comment(task_id: str, message: str) -> bool:
+    lookback_s = max(0, int(ONBOARDING_NOTIFY_DEDUP_LOOKBACK_SECONDS or 0))
+    if lookback_s <= 0:
+        return False
+
+    wanted = _normalize_comment_text(message)
+    if not wanted:
+        return False
+
+    cutoff_ms = int(time.time() * 1000) - (lookback_s * 1000)
+    for comment in get_task_comments_any(task_id):
+        date_ms = _comment_date_ms(comment)
+        if date_ms and date_ms < cutoff_ms:
+            continue
+        existing = _normalize_comment_text(_comment_text(comment))
+        if wanted in existing:
+            return True
+    return False
+
+
+def _post_message(task_id: str, message: str) -> dict | None:
+    if _has_recent_duplicate_comment(task_id, message):
+        logger.info(
+            "onboarding_notify.skip comentario_duplicado task_id=%s mensagem='%s'",
+            task_id,
+            message,
+        )
+        return {"skipped": "duplicate_comment", "task_id": task_id}
+
+    return create_task_comment_with_tags_any(
         task_id=task_id,
         text_prefix=message,
         user_ids=_target_user_ids(),
         user_names_fallback=_target_user_names(),
     )
+
+
+def _post_notification(task_id: str, list_name: str, status_name: str) -> dict | None:
+    if not _is_enabled():
+        return None
+
+    message = _build_message(list_name, status_name)
+    result = _post_message(task_id, message)
+    if isinstance(result, dict) and result.get("skipped") == "duplicate_comment":
+        return result
+
     logger.info(
         "onboarding_notify.ok task_id=%s lista='%s' status='%s' user_ids=%s",
         task_id,
@@ -130,12 +191,10 @@ def run_status_change(
         old_status=old_status,
         new_status=context.new_status,
     )
-    result = create_task_comment_with_tags_any(
-        task_id=context.task_id,
-        text_prefix=message,
-        user_ids=_target_user_ids(),
-        user_names_fallback=_target_user_names(),
-    )
+    result = _post_message(context.task_id, message)
+    if isinstance(result, dict) and result.get("skipped") == "duplicate_comment":
+        return result
+
     logger.info(
         "onboarding_notify.status_change.ok task_id=%s lista='%s' old_status='%s' new_status='%s' user_ids=%s",
         context.task_id,
