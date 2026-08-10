@@ -81,6 +81,14 @@ def _extract_webhook_events(webhook: dict) -> set[str]:
 
 def _is_webhook_active(webhook: dict) -> bool:
     status = str(webhook.get("status") or "").strip().lower()
+    health = webhook.get("health") or {}
+    health_status = ""
+    if isinstance(health, dict):
+        health_status = str(health.get("status") or "").strip().lower()
+
+    if health_status in {"disabled", "inactive", "suspended"}:
+        return False
+
     if not status:
         # Alguns payloads de listagem nao retornam status.
         # Nesse caso, assume ativo e valida via health/events.
@@ -254,6 +262,22 @@ def _repair_team_webhook_sync(team_id: str) -> tuple[set[str], set[str], int]:
 
         if requires_recreate:
             try:
+                if primary_id:
+                    delete_webhook_any(primary_id)
+                    team_repairs += 1
+                    _secret_by_webhook_id.pop(primary_id, None)
+                    candidates = [
+                        webhook
+                        for webhook in candidates
+                        if _extract_webhook_id(webhook) != primary_id
+                    ]
+                    logger.warning(
+                        "webhook_guard.repair removido_para_recriar team=%s webhook_id=%s reason=%s",
+                        team_id,
+                        primary_id,
+                        reason,
+                    )
+
                 created = create_team_webhook(team_id, WEBHOOK_ENDPOINT, WEBHOOK_EXPECTED_EVENTS)
                 created_id = _extract_webhook_id(created)
                 if created_id:
