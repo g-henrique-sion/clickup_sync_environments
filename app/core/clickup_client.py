@@ -1343,9 +1343,17 @@ def resolve_list_status_name_any(list_id: str, wanted_status: str) -> str | None
 def _pick_destination_status_name(
     target_statuses: list[dict],
     source_status_name: str | None,
+    destination_status_name: str | None = None,
 ) -> str | None:
     if not target_statuses:
         return None
+
+    destination_norm = _normalize_status_text(destination_status_name)
+    if destination_norm:
+        for status in target_statuses:
+            name = str(status.get("status") or status.get("name") or "").strip()
+            if _normalize_status_text(name) == destination_norm:
+                return name
 
     source_norm = _normalize_status_text(source_status_name)
     if source_norm:
@@ -1376,11 +1384,16 @@ def _move_task_home_list_with_session(
     task_id: str,
     target_list_id: str,
     source_status_name: str | None,
+    destination_status_name: str | None = None,
     custom_fields_to_move: list[str] | None = None,
 ) -> dict:
     target_list_data = _fetch_list_with_session(session, target_list_id)
     target_statuses = target_list_data.get("statuses") or []
-    destination_status_name = _pick_destination_status_name(target_statuses, source_status_name)
+    destination_status_name = _pick_destination_status_name(
+        target_statuses,
+        source_status_name,
+        destination_status_name,
+    )
     destination_status_id = ""
     if destination_status_name:
         destination_status_norm = _normalize_status_text(destination_status_name)
@@ -1542,6 +1555,7 @@ def move_task_to_list_any(
     task_id: str,
     target_list_id: str,
     source_status_name: str | None = None,
+    destination_status_name: str | None = None,
     custom_fields_to_move: list[str] | None = None,
 ) -> dict:
     """Move uma task para nova home list mantendo o mesmo ID da task."""
@@ -1552,6 +1566,7 @@ def move_task_to_list_any(
             task_id=task_id,
             target_list_id=target_list_id,
             source_status_name=source_status_name,
+            destination_status_name=destination_status_name,
             custom_fields_to_move=custom_fields_to_move,
         )
     except Exception:
@@ -1561,6 +1576,7 @@ def move_task_to_list_any(
             task_id=task_id,
             target_list_id=target_list_id,
             source_status_name=source_status_name,
+            destination_status_name=destination_status_name,
             custom_fields_to_move=custom_fields_to_move,
         )
 

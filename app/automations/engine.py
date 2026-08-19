@@ -11,6 +11,7 @@ from app.automations import (
     environment_sync,
     inadimplentes_finalizacao,
     onboarding_notify,
+    planejamento_black_to_ongoing,
     relationship_bilateral,
     relationship_unilateral_black,
     task_name_on_create,
@@ -155,6 +156,10 @@ def process_status_change(
     )
     if inadimplentes_result is not None:
         return inadimplentes_result
+
+    planejamento_to_ongoing_result = planejamento_black_to_ongoing.run(context)
+    if planejamento_to_ongoing_result is not None:
+        return planejamento_to_ongoing_result
 
     if context.source_list_id in {
         PLANEJAMENTO_BLACK_SYNC_LIST_ID,

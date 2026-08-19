@@ -251,6 +251,24 @@ AUDITORIA_RATEIO_BLACK_LIST_ID: str = os.getenv(
     PLANEJAMENTO_BLACK_SYNC_LIST_ID,
 ).strip()
 
+# Roteamento final do Planejamento Black para Ongoing
+PLANEJAMENTO_BLACK_TO_ONGOING_ENABLED: bool = _parse_bool(
+    os.getenv("PLANEJAMENTO_BLACK_TO_ONGOING_ENABLED"),
+    default=True,
+)
+PLANEJAMENTO_BLACK_TO_ONGOING_TRIGGER_STATUS: str = os.getenv(
+    "PLANEJAMENTO_BLACK_TO_ONGOING_TRIGGER_STATUS",
+    "1a Fatura Com Desconto",
+).strip()
+PLANEJAMENTO_BLACK_TO_ONGOING_TARGET_LIST_ID: str = os.getenv(
+    "PLANEJAMENTO_BLACK_TO_ONGOING_TARGET_LIST_ID",
+    ONGOING_SYNC_LIST_ID,
+).strip()
+PLANEJAMENTO_BLACK_TO_ONGOING_TARGET_STATUS: str = os.getenv(
+    "PLANEJAMENTO_BLACK_TO_ONGOING_TARGET_STATUS",
+    "Ativo",
+).strip()
+
 # Automacao de criacao (Adesao Reprovada -> Demissoes)
 ADESAO_REPROVADA_LIST_ID: str = os.getenv(
     "ADESAO_REPROVADA_LIST_ID",
