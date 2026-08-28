@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from app.config.settings import SOURCE_CLICKUP_TOKEN
+from app.config.settings import SOURCE_CLICKUP_TOKEN, WEBHOOK_EXPECTED_EVENTS
 
 BASE_URL = "https://api.clickup.com/api/v2"
 
@@ -31,12 +31,22 @@ def _headers():
     return {"Authorization": SOURCE_CLICKUP_TOKEN, "Content-Type": "application/json"}
 
 
+def _mask_secret(secret: str | None) -> str:
+    value = str(secret or "").strip()
+    if not value:
+        return "N/A"
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-4:]}"
+
+
 def create_webhook(team_id: str, endpoint: str) -> None:
-    """Registra um webhook no ClickUp para taskStatusUpdated."""
+    """Registra um webhook no ClickUp com eventos esperados."""
     url = f"{BASE_URL}/team/{team_id}/webhook"
+    events = WEBHOOK_EXPECTED_EVENTS or ["taskStatusUpdated", "taskCreated"]
     payload = {
         "endpoint": endpoint,
-        "events": ["taskStatusUpdated"],
+        "events": events,
         "status": "active",
     }
 
@@ -49,7 +59,7 @@ def create_webhook(team_id: str, endpoint: str) -> None:
     print(f"  ID:       {webhook.get('id')}")
     print(f"  Endpoint: {webhook.get('endpoint')}")
     print(f"  Events:   {webhook.get('events')}")
-    print(f"  Secret:   {webhook.get('secret', 'N/A')}")
+    print(f"  Secret:   {_mask_secret(webhook.get('secret'))}")
     print(f"\nGuarde o Secret no .env como WEBHOOK_SECRET para validação.")
 
 

@@ -28,10 +28,20 @@ from app.config.settings import (
     ONBOARDING_BLACK_SYNC_LIST_ID,
     ONBOARDING_SYNC_LIST_ID,
     ONGOING_SYNC_LIST_ID,
+    PLANEJAMENTO_BLACK_TO_ONGOING_TRIGGER_STATUS,
     PLANEJAMENTO_BLACK_SYNC_LIST_ID,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _should_sync_black_before_final_move(context) -> bool:
+    """Final Black status must sync its peer before moving out of Planejamento."""
+    return (
+        context.source_list_id == PLANEJAMENTO_BLACK_SYNC_LIST_ID
+        and context.normalized_new_status
+        == normalize_status(PLANEJAMENTO_BLACK_TO_ONGOING_TRIGGER_STATUS)
+    )
 
 
 def process_clickup_event(
@@ -156,6 +166,17 @@ def process_status_change(
     )
     if inadimplentes_result is not None:
         return inadimplentes_result
+
+    if _should_sync_black_before_final_move(context):
+        logger.debug(
+            "process_status_change.rota sync_black_antes_move_final task_id=%s list_id=%s status='%s'",
+            context.task_id,
+            context.source_list_id,
+            context.new_status,
+        )
+        black_sync_result = relationship_unilateral_black.run(context)
+        planejamento_to_ongoing_result = planejamento_black_to_ongoing.run(context)
+        return planejamento_to_ongoing_result or black_sync_result
 
     planejamento_to_ongoing_result = planejamento_black_to_ongoing.run(context)
     if planejamento_to_ongoing_result is not None:
